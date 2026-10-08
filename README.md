@@ -83,7 +83,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 
 ## Roadmap - VLC Features
 
-✅ In the app · Planned
+✅ In the app.
 
 ### 🎞️ Video
 
