@@ -83,7 +83,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 
 ## Roadmap - VLC Features
 
-✅ In the app · 🗓️ Planned
+✅ In the app · Planned
 
 ### 🎞️ Video
 
@@ -101,9 +101,9 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | 360° videos (look around with the right stick) | ✅ |
 | Frame-by-frame step | ✅ |
 | Screenshots to PNG | ✅ |
-| Hardware decoding (H.264 / HEVC / VP9 up to 4K) | Planned |
-| HDR → SDR tone mapping | Planned |
-| HDR10 output to the TV | Planned |
+| Hardware decoding (H.264 / HEVC / VP9 up to 4K) | Not yet |
+| HDR → SDR tone mapping | Not yet |
+| HDR10 output to the TV | Not yet |
 
 ### 🔊 Audio
 
@@ -180,8 +180,8 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Network links: HTTP, HTTPS, HLS, DASH, UDP, RTP, FTP | ✅ |
 | Free TV channels (iptv-org) | ✅ |
 | Internet radio (radio-browser) | ✅ |
-| TV guide (EPG) for channels | 🗓️ |
-| Podcast feeds | 🗓️ |
+| TV guide (EPG) for channels | Not yet |
+| Podcast feeds | Not yet |
 
 ### 💿 Discs & files
 
