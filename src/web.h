@@ -1,8 +1,8 @@
 /*
  * VLC-PS5's web page for phones and computers on the same network: send
- * videos and music to the console (no FTP), and a remote for what's playing.
+ * videos and music to the console (no FTP), and an OpenSubtitles key.
  * A small HTTP server on its own threads; the main thread hands it what it
- * may show (web_set_*) and takes the remote's commands (web_next_command).
+ * may show (web_set_*) and takes what arrived (web_take_*).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -24,24 +24,13 @@ struct WebPlace {
 };
 void web_set_places(const std::vector<WebPlace> &places);
 
-/* What the remote shows. */
-struct WebStatus {
-    bool playing;      /* a file is open */
-    bool paused;
-    std::string title;
-    int64_t time_ms, length_ms;
-    int volume;        /* 0..200 */
-    bool loop;
+/* What the page shows about subtitle downloads: never the key or the
+ * password, only whether a key is saved, the account and the last check. */
+struct WebOsubInfo {
+    bool has_key, checking, failed; /* failed: the last check went wrong */
+    std::string user, message;
 };
-void web_set_status(const WebStatus &s);
-
-/* The remote's buttons, for the main thread. */
-enum WebCommandKind { WEB_TOGGLE, WEB_JUMP, WEB_SEEK, WEB_NEXT, WEB_PREV, WEB_VOLUME, WEB_STOP };
-struct WebCommand {
-    WebCommandKind kind;
-    int64_t value; /* JUMP: ms (+/-), SEEK: ms, VOLUME: +/- percent */
-};
-bool web_next_command(WebCommand *c);
+void web_set_osub_info(const WebOsubInfo &info);
 
 /* An upload in progress (for the TV), and whether one finished since asked. */
 struct WebUpload {

@@ -1,7 +1,7 @@
 /*
  * VLC-PS5's web page server: plain HTTP/1.1 on port 8080 for the local
  * network. One thread listens; each connection gets its own (at most 8), so a
- * long upload doesn't hold up the remote. Uploads stream to "<name>.part" and
+ * long upload doesn't hold up the rest of the page. Uploads stream to "<name>.part" and
  * are renamed when complete, so the library never sees half a file.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -10,8 +10,8 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <atomic>
-#include <deque>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,8 +41,7 @@ const int MAX_CONNECTIONS = 8;
 
 std::mutex lock;
 std::vector<WebPlace> places;
-WebStatus status;
-std::deque<WebCommand> commands;
+WebOsubInfo osub_info;
 WebUpload upload;
 bool finished;
 /* an OpenSubtitles key and account sent from the page */
@@ -249,6 +248,56 @@ void handle_upload(int fd, const std::string &query, int64_t length, std::string
     respond(fd, ok ? 200 : 500, "text/plain", ok ? "ok" : "The upload stopped: connection or disk full");
 }
 
+/* A file from the PS5 to the phone or computer: streamed from the disk in
+ * 1 MiB pieces, so any size goes (a 40 GB film too), as an attachment so
+ * the browser saves it instead of playing it. */
+void handle_download(int fd, const std::string &query)
+{
+    std::string dir, name = query_value(query, "name");
+    if (!place_path(query_value(query, "dir"), &dir) || !safe_name(name)) {
+        respond(fd, 400, "text/plain", "That name or folder can't be used");
+        return;
+    }
+    std::string path = dir + "/" + name;
+    int in = open(path.c_str(), O_RDONLY);
+    struct stat st;
+    if (in < 0 || fstat(in, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (in >= 0)
+            close(in);
+        respond(fd, 404, "text/plain", "not found");
+        return;
+    }
+    /* the name for the browser: plain letters as they are, the rest %-coded */
+    std::string coded;
+    for (unsigned char c : name) {
+        char hex[4];
+        snprintf(hex, sizeof(hex), "%%%02X", c);
+        coded += isalnum(c) || strchr("-._~", c) ? std::string(1, (char)c) : std::string(hex);
+    }
+    char head[1024];
+    int n = snprintf(head, sizeof(head),
+                     "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %lld\r\n"
+                     "Content-Disposition: attachment; filename*=UTF-8''%s\r\n"
+                     "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                     (long long)st.st_size, coded.c_str());
+    struct timeval tv = { 60, 0 }; /* a phone that stops reading lets go of the thread */
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    bool ok = n > 0 && n < (int)sizeof(head) && write_all(fd, head, (size_t)n);
+    std::vector<char> buf(1 << 20);
+    int64_t sent = 0;
+    while (ok) {
+        ssize_t r = read(in, buf.data(), buf.size());
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        ok = write_all(fd, buf.data(), (size_t)r);
+        sent += r;
+    }
+    close(in);
+    fprintf(stderr, "web: %s %s\n", name.c_str(), sent == st.st_size ? "sent" : "stopped (connection)");
+}
+
 void handle_files(int fd, const std::string &query)
 {
     std::string dir;
@@ -317,6 +366,8 @@ void handle(int fd)
         respond(fd, 200, "application/json", out + "]");
     } else if (method == "GET" && path == "/api/files") {
         handle_files(fd, query);
+    } else if (method == "GET" && path == "/api/download") {
+        handle_download(fd, query);
     } else if (method == "PUT" && path == "/api/upload") {
         handle_upload(fd, query, length, body);
     } else if (method == "DELETE" && path == "/api/file") {
@@ -328,38 +379,20 @@ void handle(int fd)
             finished = true; /* the library looks again */
         }
         respond(fd, ok ? 200 : 404, "text/plain", ok ? "ok" : "not found");
-    } else if (method == "GET" && path == "/api/status") {
-        WebStatus s;
+    } else if (method == "GET" && path == "/api/opensubtitles") {
+        WebOsubInfo s;
+        bool waiting;
         {
             std::lock_guard<std::mutex> g(lock);
-            s = status;
+            s = osub_info;
+            waiting = osub_sent; /* sent, not yet taken by the main thread */
         }
-        std::string out = std::string("{\"playing\":") + (s.playing ? "true" : "false") +
-                          ",\"paused\":" + (s.paused ? "true" : "false") +
-                          ",\"title\":" + json_string(s.title) +
-                          ",\"time\":" + std::to_string(s.time_ms) +
-                          ",\"length\":" + std::to_string(s.length_ms) +
-                          ",\"volume\":" + std::to_string(s.volume) + "}";
+        std::string out = std::string("{\"key\":") + (s.has_key ? "true" : "false") +
+                          ",\"checking\":" + (s.checking || waiting ? "true" : "false") +
+                          ",\"failed\":" + (s.failed ? "true" : "false") +
+                          ",\"user\":" + json_string(s.user) +
+                          ",\"message\":" + json_string(s.message) + "}";
         respond(fd, 200, "application/json", out);
-    } else if (method == "POST" && path == "/api/cmd") {
-        std::string c = query_value(query, "c");
-        int64_t v = atoll(query_value(query, "v").c_str());
-        WebCommandKind k;
-        bool known = true;
-        if (c == "toggle") k = WEB_TOGGLE;
-        else if (c == "jump") k = WEB_JUMP;
-        else if (c == "seek") k = WEB_SEEK;
-        else if (c == "next") k = WEB_NEXT;
-        else if (c == "prev") k = WEB_PREV;
-        else if (c == "vol") k = WEB_VOLUME;
-        else if (c == "stop") k = WEB_STOP;
-        else known = false;
-        if (known) {
-            std::lock_guard<std::mutex> g(lock);
-            if (commands.size() < 32)
-                commands.push_back({ k, v });
-        }
-        respond(fd, known ? 200 : 400, "text/plain", known ? "ok" : "unknown command");
     } else if (method == "POST" && path == "/api/opensubtitles") {
         /* a small form: the rest of its body, then key, user, pass */
         while ((int64_t)body.size() < length && length < 4096) {
@@ -483,20 +516,10 @@ void web_set_places(const std::vector<WebPlace> &p)
     places = p;
 }
 
-void web_set_status(const WebStatus &s)
+void web_set_osub_info(const WebOsubInfo &info)
 {
     std::lock_guard<std::mutex> g(lock);
-    status = s;
-}
-
-bool web_next_command(WebCommand *c)
-{
-    std::lock_guard<std::mutex> g(lock);
-    if (commands.empty())
-        return false;
-    *c = commands.front();
-    commands.pop_front();
-    return true;
+    osub_info = info;
 }
 
 WebUpload web_upload_state()

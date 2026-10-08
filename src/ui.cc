@@ -160,6 +160,19 @@ std::string vlc_message(const std::string &m)
 {
     if (m.compare(0, 29, "VLC is unable to open the MRL") == 0)
         return "VLC couldn't open this address: it may be offline, or need a login";
+    /* the SMB login (VLC's smb2 module): who asks, then what to type */
+    if (m == "SMB authentication required")
+        return "Sign in to the share";
+    if (m.compare(0, 14, "The computer (") == 0 && m.find(')') != std::string::npos) {
+        std::string host = m.substr(14, m.find(')') - 14);
+        bool more = m.find("Please provide") != std::string::npos;
+        return trf("%s needs a user name and password.", host.c_str()) +
+               (more ? std::string(" ") + tr("A Windows PC takes its own account; a NAS, the user you made on it.") : "");
+    }
+    if (m.compare(0, 14, "Please provide") == 0)
+        return "A Windows PC takes its own account; a NAS, the user you made on it.";
+    if (m.compare(0, 6, "Track ") == 0 && m.size() > 6 && isdigit((unsigned char)m[6]))
+        return trf("Track %d", atoi(m.c_str() + 6));
     return m;
 }
 
@@ -423,6 +436,8 @@ void ci_file(float cx, float cy, float s, int kind)
         tri(bx - s * 0.24f, by + s * 0.16f, bx - s * 0.06f, by - s * 0.04f, bx + s * 0.1f, by + s * 0.16f, IM_COL32(70, 150, 70, 255));
         tri(bx, by + s * 0.16f, bx + s * 0.12f, by + s * 0.04f, bx + s * 0.24f, by + s * 0.16f, IM_COL32(50, 125, 55, 255));
         stroke(bx - s * 0.24f, by - s * 0.2f, s * 0.48f, s * 0.36f, IM_COL32(90, 96, 106, 255), 0, 1);
+        break;
+    case 5: /* any other file: a blank page */
         break;
     default:
         for (int i = 0; i < 4; i++)
@@ -806,8 +821,8 @@ bool hit(uint32_t b)
 
 /* ---- state -------------------------------------------------------------------- */
 
-enum Tab { HOME, VIDEOS, MUSIC, BROWSE, TABS };
-const char *const tab_names[TABS] = { "Home", "Videos", "Music", "Browse" };
+enum Tab { HOME, VIDEOS, MUSIC, PLAYLISTS, BROWSE, TABS };
+const char *const tab_names[TABS] = { "Home", "Videos", "Music", "Playlists", "Browse" };
 
 enum Screen { LIBRARY, PLAYER, VIEWER };
 Screen screen = LIBRARY;
@@ -862,7 +877,7 @@ uint64_t hash_id(const std::string &s, uint64_t salt)
 
 /* Modals. */
 enum Modal { NONE, TEXT_VIEW, OPTIONS, RESUME, INFO, TRACKS, DETAILS, SETTINGS, SPEAKERS, PHONE, SEARCH, LINK, CONFIRM_DELETE,
-             ADD_SHARE, LOGIN, QUESTION, OSUB_SETUP, OSUB_RESULTS };
+             ADD_SHARE, LOGIN, QUESTION, OSUB_SETUP, OSUB_RESULTS, PL_PICK, PL_NAME };
 Modal modal = NONE;
 float modal_anim;
 int modal_focus;
@@ -967,7 +982,7 @@ void rebuild_lists()
     music_list.clear();
     pictures_list.clear();
     for (int i = 0; i < (int)items.size(); i++)
-        if (!items[i].text && !items[i].archive)
+        if (!items[i].text && !items[i].archive && !items[i].other)
             (items[i].image ? pictures_list : items[i].audio ? music_list : videos_list).push_back(i);
     home_rows.clear();
     Row cont = { "Continue watching", {} }, recent = { "Recently added", {} },
@@ -1053,7 +1068,8 @@ void rebuild_browse()
     for (int i = 0; i < (int)items.size(); i++) {
         const std::string &f = items[i].folder;
         if (f == browse_dir) {
-            browse_entries.push_back({ items[i].name + "." + items[i].ext, items[i].path, false, i, false });
+            browse_entries.push_back({ items[i].ext.empty() ? items[i].name : items[i].name + "." + items[i].ext,
+                                       items[i].path, false, i, false });
         } else if (f.compare(0, browse_dir.size() + 1, browse_dir + "/") == 0) {
             std::string sub = f.substr(browse_dir.size() + 1);
             sub = sub.substr(0, sub.find('/'));
@@ -1147,6 +1163,12 @@ void open_item(int item, const std::vector<int> &list)
     }
     if (m.archive) {
         open_archive(m);
+        return;
+    }
+    if (m.other) {
+        /* listed so Browse shows everything, but not something VLC plays:
+         * no player screen, just the note */
+        toast(trf("Couldn't play %s", (m.ext.empty() ? m.name : m.name + "." + m.ext).c_str()), 2.5);
         return;
     }
     if (m.resume_ms > 0) {
@@ -1302,7 +1324,13 @@ void tab_icon(int i, float cx, float cy, float s, ImU32 col)
         line(cx + s * 0.45f, cy + s * 0.22f, cx + s * 0.45f, cy - s * 0.48f, col, t);
         line(cx - s * 0.11f, cy - s * 0.4f, cx + s * 0.45f, cy - s * 0.48f, col, t);
         break;
-    case 3: /* folder: tab on top, open front */
+    case 3: /* playlists: lines and a play mark */
+        line(cx - s * 0.5f, cy - s * 0.36f, cx + s * 0.5f, cy - s * 0.36f, col, t);
+        line(cx - s * 0.5f, cy - s * 0.02f, cx + s * 0.08f, cy - s * 0.02f, col, t);
+        line(cx - s * 0.5f, cy + s * 0.32f, cx + s * 0.08f, cy + s * 0.32f, col, t);
+        tri(cx + s * 0.24f, cy - s * 0.06f, cx + s * 0.24f, cy + s * 0.42f, cx + s * 0.56f, cy + s * 0.18f, col);
+        break;
+    case 4: /* folder: tab on top, open front */
         dl->PathLineTo(P(cx - s * 0.5f, cy + s * 0.38f));
         dl->PathLineTo(P(cx - s * 0.5f, cy - s * 0.38f));
         dl->PathLineTo(P(cx - s * 0.12f, cy - s * 0.38f));
@@ -1491,7 +1519,7 @@ void video_card_classic(float x, float y, float w, int item, float f)
         rect(x, y + h - 4, w * frac, 4, C_ORANGE);
     }
     text(f_reg, 22, x, y + h + 12, C_TEXT, m.name.c_str(), 0, w);
-    std::string meta = m.audio && !m.artist.empty() ? m.artist : m.ext + (m.image ? " image" : m.audio ? " audio" : " video");
+    std::string meta = m.audio && !m.artist.empty() ? m.artist : trf(m.image ? "%s image" : m.audio ? "%s audio" : "%s video", m.ext.c_str());
     if (m.resume_ms > 0)
         meta += ", " + trf("%s left", format_time(m.length_ms - m.resume_ms).c_str());
     text(f_reg, 18, x, y + h + 42, C_FAINT, meta.c_str(), 0, w);
@@ -1638,7 +1666,7 @@ int focused_item()
     case VIDEOS:
         return videos_list.empty() ? -1 : videos_list[std::min(video_focus, (int)videos_list.size() - 1)];
     case MUSIC: {
-        int np = (int)library_playlists().size();
+        int np = 0; /* playlists have their own tab */
         if (music_focus < np || music_list.empty())
             return -1;
         return music_list[std::min(music_focus - np, (int)music_list.size() - 1)];
@@ -1687,7 +1715,7 @@ void library_actions()
     int item = focused_item();
     if (item < 0)
         return;
-    if (hit(PAD_TRIANGLE)) {
+    if (hit(PAD_TRIANGLE) && !L()[item].other) { /* no favourites for files VLC doesn't play */
         std::string path = L()[item].path;
         bool on = library_toggle_favourite(path);
         rebuild_lists();
@@ -1830,7 +1858,7 @@ void list_row(float x, float y, float w, float h, float f, bool even)
 void tab_music()
 {
     auto &pls = library_playlists();
-    int np = (int)pls.size(), ns = (int)music_list.size(), n = np + ns;
+    int np = 0, ns = (int)music_list.size(), n = np + ns; /* playlists have their own tab */
     if (n == 0) {
         empty_state();
         return;
@@ -1943,6 +1971,379 @@ void tab_music()
             text(f_semi, 22, 1792, y + 24, C_DIM, format_time(m.length_ms).c_str(), 1);
     }
     dl->PopClipRect();
+}
+
+/* ---- Playlists ------------------------------------------------------------------- */
+
+/* The list of playlists ("New playlist" first), or one opened: its files. */
+int pl_focus, pl_item_focus;
+float pl_scroll, pl_item_scroll;
+std::string pl_open;          /* the playlist being looked at, "" for the list */
+std::vector<int> pl_items;    /* its files that are in the library */
+double pl_items_at = -100;    /* read again now and then (drives come and go) */
+std::string pl_add_file;      /* PL_PICK / PL_NAME: the file to put in */
+std::string pl_rename;        /* PL_NAME: the playlist renamed, "" for a new one */
+void icon_plus_circle(float cx, float cy, float s, ImU32 col);
+void open_playlist_name(const std::string &rename);
+
+const PlaylistFile *playlist_by_path(const std::string &path)
+{
+    for (const PlaylistFile &p : library_playlists())
+        if (p.path == path)
+            return &p;
+    return nullptr;
+}
+
+void pl_reload()
+{
+    pl_items = library_playlist_items(pl_open);
+    pl_items_at = now;
+    if (pl_item_focus >= (int)pl_items.size())
+        pl_item_focus = std::max(0, (int)pl_items.size() - 1);
+}
+
+/* "3 videos · 1:24:10", for a list of library files. */
+std::string pl_summary(const std::vector<int> &list)
+{
+    int64_t total = 0;
+    for (int i : list)
+        total += std::max<int64_t>(0, L()[i].length_ms);
+    std::string out = list.size() == 1 ? std::string(tr("1 item")) : trf("%d items", (int)list.size());
+    if (total > 0)
+        out += "  \xC2\xB7  " + format_time(total);
+    return out;
+}
+
+float text_wrapped(ImFont *f, float size, float x, float y, ImU32 col, const std::string &s_in, float max_w, int max_lines);
+
+/* A playlist's files, looked up again every few seconds (for covers and counts). */
+const std::vector<int> &playlist_items_cached(const std::string &path)
+{
+    struct Cached {
+        double at;
+        std::vector<int> items;
+    };
+    static std::unordered_map<std::string, Cached> cache;
+    Cached &c = cache[path];
+    if (c.at == 0 || now - c.at > 3) {
+        c.items = library_playlist_items(path);
+        c.at = now;
+    }
+    return c.items;
+}
+
+/* A picture covering (x, y, w, h): the thumbnail cropped to that shape. */
+void thumb_cover(const MediaItem &m, float x, float y, float w, float h, float round, ImDrawFlags corners)
+{
+    float ta = m.thumb_aspect > 0 ? m.thumb_aspect : (m.audio ? 1.0f : 16.0f / 9), ca = w / h;
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+    if (ta > ca) {
+        u0 = (1 - ca / ta) / 2;
+        u1 = 1 - u0;
+    } else {
+        v0 = (1 - ta / ca) / 2;
+        v1 = 1 - v0;
+    }
+    dl->AddImageRounded(m.thumb, P(x, y), P(x + w, y + h), ImVec2(u0, v0), ImVec2(u1, v1), IM_COL32_WHITE,
+                        round * S, corners);
+}
+
+/* A playlist's cover, as VLC 4 makes it: its first file's picture, or the
+ * first four in a 2x2 mosaic, each a 16:9 picture of its own (no squeezing). */
+void playlist_cover(const std::string &path, float x, float y, float w, float h, float round)
+{
+    std::vector<int> pics;
+    for (int i : playlist_items_cached(path))
+        if (i < (int)L().size() && L()[i].thumb && pics.size() < 4)
+            pics.push_back(i);
+    if (pics.empty()) {
+        dl->AddRectFilledMultiColor(P(x, y), P(x + w, y + h), tint_for(path, 0.30f), tint_for(path + "#", 0.22f),
+                                    tint_for(path, 0.12f), tint_for(path + "#", 0.16f));
+        if (round > 0)
+            stroke(x, y, w, h, C_BG, round, 4); /* round off the gradient's corners */
+        icon_list(x + w / 2, y + h / 2, h * 0.34f, IM_COL32(255, 255, 255, 170));
+        return;
+    }
+    if (pics.size() < 4) {
+        thumb_cover(L()[pics[0]], x, y, w, h, round, ImDrawFlags_RoundCornersAll);
+        return;
+    }
+    const float gap = 3;
+    float cw = (w - gap) / 2, ch = (h - gap) / 2;
+    static const ImDrawFlags corner[4] = { ImDrawFlags_RoundCornersTopLeft, ImDrawFlags_RoundCornersTopRight,
+                                           ImDrawFlags_RoundCornersBottomLeft, ImDrawFlags_RoundCornersBottomRight };
+    rect(x, y, w, h, IM_COL32(0, 0, 0, 255), round);
+    for (int k = 0; k < 4; k++)
+        thumb_cover(L()[pics[k]], x + (k % 2) * (cw + gap), y + (k / 2) * (ch + gap), cw, ch, round, corner[k]);
+}
+
+/* A playlist card, the size of a video card: the cover, the name, what's in
+ * it. path "" is the "New playlist" card. */
+void playlist_card(float x, float y, float w, const PlaylistFile *pl, float f)
+{
+    float h = w * 9 / 16;
+    std::string sub;
+    if (pl) {
+        const std::vector<int> &items = playlist_items_cached(pl->path);
+        sub = library_playlist_ours(pl->path) ? pl_summary(items)
+                                              : std::string(tr("Playlist")) + "  \xC2\xB7  " + pl->folder.substr(pl->folder.rfind('/') + 1);
+    }
+    const char *name = pl ? pl->name.c_str() : tr("New playlist");
+    if (classic_look) {
+        sel_box(x - 12, y - 12, w + 24, h + 96, f);
+        rect(x + 3, y + 4, w, h, IM_COL32(0, 0, 0, 110));
+        if (pl) {
+            playlist_cover(pl->path, x, y, w, h, 0);
+        } else {
+            vgrad(x, y, w, h, IM_COL32(52, 56, 64, 255), IM_COL32(30, 32, 37, 255));
+            ci_file(x + w / 2, y + h / 2, h * 0.5f, 2);
+            circle(x + w / 2 + h * 0.16f, y + h / 2 + h * 0.16f, h * 0.12f, C_ORANGE);
+            rect(x + w / 2 + h * 0.16f - h * 0.07f, y + h / 2 + h * 0.16f - h * 0.015f, h * 0.14f, h * 0.03f, IM_COL32_WHITE);
+            rect(x + w / 2 + h * 0.16f - h * 0.015f, y + h / 2 + h * 0.16f - h * 0.07f, h * 0.03f, h * 0.14f, IM_COL32_WHITE);
+        }
+        stroke(x, y, w, h, IM_COL32(255, 255, 255, 46), 0, 1);
+        text(f_reg, 22, x, y + h + 12, C_TEXT, name, 0, w);
+        if (pl)
+            text(f_reg, 18, x, y + h + 42, C_FAINT, sub.c_str(), 0, w);
+        else /* long in some languages: two lines */
+            text_wrapped(f_reg, 18, x, y + h + 42, C_FAINT, "Then add videos and songs from anywhere with the Options menu", w, 2);
+        return;
+    }
+    float grow = 1 + 0.07f * ease(f);
+    float cw = w * grow, ch = h * grow;
+    float cx = x - (cw - w) / 2, cy = y - (ch - h) / 2 - 6 * f;
+    glow(cx, cy + 10, cw, ch, 16, IM_COL32(0, 0, 0, 255), 22);
+    if (f > 0.01f)
+        glow(cx, cy, cw, ch, 16, alpha(C_ORANGE, f * 0.9f), 18);
+    if (pl) {
+        playlist_cover(pl->path, cx, cy, cw, ch, 16);
+        /* how many, bottom right, like a video's length */
+        const std::vector<int> &items = playlist_items_cached(pl->path);
+        std::string count = std::to_string(items.size());
+        float tw = text_size(f_semi, 18, count.c_str()).x;
+        rect(cx + cw - tw - 54, cy + ch - 40, tw + 44, 28, IM_COL32(0, 0, 0, 170), 8);
+        icon_list(cx + cw - tw - 38, cy + ch - 26, 16, C_TEXT);
+        text(f_semi, 18, cx + cw - tw - 18, cy + ch - 36, C_TEXT, count.c_str());
+    } else {
+        rect(cx, cy, cw, ch, IM_COL32(255, 255, 255, 12), 16);
+        if (f > 0.01f)
+            rect(cx, cy, cw, ch, alpha(C_ORANGE, 0.10f * f), 16); /* a light tint when chosen */
+        stroke(cx, cy, cw, ch, alpha(C_ORANGE, 0.35f + 0.45f * f), 16, 2);
+        icon_plus_circle(cx + cw / 2, cy + ch / 2, ch * 0.32f, mix(C_DIM, C_ORANGE, 0.5f + 0.5f * f));
+    }
+    if (f > 0.01f)
+        stroke(cx - 2, cy - 2, cw + 4, ch + 4, alpha(IM_COL32(255, 255, 255, 255), f), 18, 3);
+    text(f_semi, 22, x, y + h + 16 + 4 * f, mix(C_DIM, C_TEXT, 0.6f + 0.4f * f), name, 0, w);
+    if (pl)
+        text(f_reg, 18, x, y + h + 46 + 4 * f, C_FAINT, sub.c_str(), 0, w);
+    else /* long in some languages: two lines */
+        text_wrapped(f_reg, 18, x, y + h + 46 + 4 * f, C_FAINT, "Then add videos and songs from anywhere with the Options menu", w, 2);
+}
+
+void tab_playlists()
+{
+    auto &pls = library_playlists();
+    if (!pl_open.empty() && !playlist_by_path(pl_open))
+        pl_open.clear(); /* deleted, or its drive went */
+    if (pl_open.empty()) {
+        /* "New playlist", then the playlists, as cards in rows of four */
+        const int cols = 4;
+        const float card_w = 396, gap_x = (1920 - 192 - cols * card_w) / (cols - 1), row_h = 330;
+        int n = 1 + (int)pls.size();
+        if (pl_focus >= n)
+            pl_focus = n - 1;
+        if (hit(PAD_LEFT) && pl_focus % cols > 0)
+            pl_focus--;
+        if (hit(PAD_RIGHT) && pl_focus % cols < cols - 1 && pl_focus + 1 < n)
+            pl_focus++;
+        if (hit(PAD_UP) && pl_focus >= cols)
+            pl_focus -= cols;
+        if (hit(PAD_DOWN) && pl_focus + cols < n)
+            pl_focus += cols;
+        if (hit(PAD_CROSS)) {
+            if (pl_focus == 0) {
+                pl_add_file.clear();
+                open_playlist_name("");
+            } else {
+                pl_open = pls[pl_focus - 1].path;
+                pl_item_focus = 0;
+                pl_item_scroll = 0;
+                pl_reload();
+            }
+        } else if (hit(PAD_TRIANGLE) && pl_focus > 0) {
+            play_playlist(pls[pl_focus - 1].path);
+        } else if (hit(PAD_SQUARE) && pl_focus > 0 && library_playlist_ours(pls[pl_focus - 1].path)) {
+            ask_delete(pls[pl_focus - 1].path, NONE);
+        }
+        int frow = pl_focus / cols;
+        pl_scroll = approach(pl_scroll, std::max(0.0f, 206 + (frow + 1) * row_h - 1000), 10);
+        if (classic_look) {
+            classic_heading(96, 140, "Playlists", pls.size());
+        } else {
+            text(f_bold, 30, 96, 140, C_TEXT, "Playlists");
+            if (!pls.empty())
+                text(f_semi, 22, 104 + text_size(f_bold, 30, "Playlists").x, 147, C_FAINT, std::to_string(pls.size()).c_str());
+        }
+        dl->PushClipRect(P(0, 186), P(1920, 1080), true);
+        for (int i = 0; i < n; i++) {
+            float x = 96 + (i % cols) * (card_w + gap_x);
+            float y = 206 + (i / cols) * row_h - pl_scroll;
+            if (y > 1080 || y + row_h < 100)
+                continue;
+            float f = focus_anim(hash_id(i ? pls[i - 1].path : "+new", 230), i == pl_focus && modal == NONE);
+            playlist_card(x, y, card_w, i ? &pls[i - 1] : nullptr, f);
+        }
+        dl->PopClipRect();
+        return;
+    }
+
+    /* One playlist open. */
+    const PlaylistFile *pl = playlist_by_path(pl_open);
+    bool ours = library_playlist_ours(pl_open);
+    if (now - pl_items_at > 2)
+        pl_reload();
+    int n = (int)pl_items.size();
+    if (hit(PAD_CIRCLE)) {
+        for (int i = 0; i < (int)pls.size(); i++)
+            if (pls[i].path == pl_open)
+                pl_focus = i + 1; /* back on the one just left */
+        pl_open.clear();
+        return;
+    }
+    if (n > 0) {
+        if (hit(PAD_UP) && pl_item_focus > 0)
+            pl_item_focus--;
+        if (hit(PAD_DOWN) && pl_item_focus + 1 < n)
+            pl_item_focus++;
+        std::string cur = L()[pl_items[pl_item_focus]].path;
+        if (hit(PAD_CROSS)) {
+            std::vector<int> list = pl_items;
+            open_item(list[pl_item_focus], list);
+            from_playlist = true; /* the next file follows by itself */
+            return;
+        } else if (hit(PAD_TRIANGLE)) {
+            play_playlist(pl_open);
+            return;
+        } else if (ours && hit(PAD_SQUARE)) {
+            if (library_playlist_remove(pl_open, cur))
+                toast(trf("Removed from %s", pl->name.c_str()), 1.8);
+            pl_reload();
+        } else if (ours && (hit(PAD_L2) || hit(PAD_R2))) {
+            int step = hit(PAD_R2) ? 1 : -1;
+            if (library_playlist_move(pl_open, cur, step)) {
+                pl_reload();
+                for (int i = 0; i < (int)pl_items.size(); i++)
+                    if (L()[pl_items[i]].path == cur)
+                        pl_item_focus = i; /* the selection goes with it */
+            }
+        }
+    }
+    n = (int)pl_items.size();
+    std::string sum = pl_summary(pl_items);
+    if (classic_look) {
+        const float top = 190, bottom = 996, rh = 48, head_h = 50;
+        const float col_type = 1100, col_len = 1792;
+        classic_columns(top - 50, { { "Name", 168, 0 }, { "Type", col_type, 0 }, { "Length", col_len, 1 } });
+        float view = bottom - top;
+        float want = std::max(0.0f, std::min(head_h + pl_item_focus * rh + rh / 2 - view * 0.45f,
+                                             std::max(0.0f, head_h + n * rh - view + 10)));
+        pl_item_scroll = approach(pl_item_scroll, want, 14);
+        dl->PushClipRect(P(0, top - 6), P(1920, bottom), true);
+        classic_heading(112, top - pl_item_scroll + 16, pl->name.c_str(), (size_t)n);
+        for (int i = 0; i < n; i++) {
+            float y = top + head_h + i * rh - pl_item_scroll;
+            if (y > bottom || y + rh < top - 60)
+                continue;
+            MediaItem &m = L()[pl_items[i]];
+            float f = focus_anim(hash_id(m.path, 240), i == pl_item_focus && modal == NONE, 16);
+            sel_box(100, y + 2, 1720, rh - 4, f);
+            text(f_reg, 21, 128, y + 13, C_FAINT, std::to_string(i + 1).c_str(), 0.5f);
+            ci_file(176, y + rh / 2, 30, m.audio ? 1 : 0);
+            text(f_reg, 23, 206, y + 11, C_TEXT, m.name.c_str(), 0, col_type - 240);
+            text(f_reg, 21, col_type, y + 13, C_DIM, trf(m.audio ? "%s audio" : "%s video", m.ext.c_str()).c_str());
+            if (m.length_ms > 0)
+                text(f_reg, 21, col_len, y + 13, C_DIM, format_time(m.length_ms).c_str(), 1);
+        }
+        dl->PopClipRect();
+        if (n == 0) {
+            text(f_semi, 26, 960, 470, C_TEXT, "This playlist is empty", 0.5f);
+            text(f_reg, 21, 960, 512, C_DIM, "Open the Options menu on a video or song and choose Add to playlist", 0.5f);
+        }
+        status_text = sum;
+        return;
+    }
+    /* Rows with a picture the same 16:9 size for every file (160x90):
+     * a video fills it, a song's square cover sits in the middle of it. */
+    const float row_h = 114, pic_w = 160, pic_h = 90;
+    pl_item_scroll = approach(pl_item_scroll, std::max(0.0f, pl_item_focus * row_h - 330), 12);
+    text(f_bold, 30, 96, 128, C_TEXT, pl->name.c_str(), 0, 1300);
+    text(f_reg, 20, 96, 168, C_FAINT, sum.c_str());
+    dl->PushClipRect(P(0, 206), P(1920, 1080), true);
+    for (int i = 0; i < n; i++) {
+        float y = 216 + i * row_h - pl_item_scroll;
+        if (y > 1080 || y + row_h < 150)
+            continue;
+        MediaItem &m = L()[pl_items[i]];
+        float f = focus_anim(hash_id(m.path, 240), i == pl_item_focus && modal == NONE);
+        list_row(96, y, 1728, row_h - 12, f, i % 2 == 0);
+        float cy = y + (row_h - 12) / 2;
+        text(f_semi, 22, 136, cy - 14, mix(C_FAINT, C_ORANGE, f), std::to_string(i + 1).c_str(), 0.5f);
+        float px = 172, py = cy - pic_h / 2;
+        float ta = m.thumb_aspect > 0 ? m.thumb_aspect : (m.audio ? 1.0f : 16.0f / 9);
+        if (m.thumb && (ta < 1.6f || ta > 2.0f)) {
+            /* not 16:9 (a song's square cover, 4:3, a phone's tall video):
+             * the whole picture, in the middle of a dark frame */
+            float fw = std::min(pic_w, pic_h * ta), fh = fw / ta;
+            rect(px, py, pic_w, pic_h, IM_COL32(255, 255, 255, 10), 10);
+            thumb_cover(m, px + (pic_w - fw) / 2, py + (pic_h - fh) / 2, fw, fh, 8, ImDrawFlags_RoundCornersAll);
+        } else if (m.thumb) {
+            thumb_cover(m, px, py, pic_w, pic_h, 10, ImDrawFlags_RoundCornersAll); /* 16:9, near enough: fills it */
+        } else {
+            dl->AddRectFilledMultiColor(P(px, py), P(px + pic_w, py + pic_h), tint_for(m.name, 0.30f),
+                                        tint_for(m.name + "#", 0.22f), tint_for(m.name, 0.12f),
+                                        tint_for(m.name + "#", 0.16f));
+            m.audio ? icon_note(px + pic_w / 2, cy, 34, IM_COL32(255, 255, 255, 170))
+                    : icon_film(px + pic_w / 2, cy, 38, IM_COL32(255, 255, 255, 150));
+        }
+        if (f > 0.01f)
+            stroke(px - 2, py - 2, pic_w + 4, pic_h + 4, alpha(IM_COL32(255, 255, 255, 255), f), 12, 2);
+        float tx = px + pic_w + 28;
+        text(f_semi, 26, tx, cy - 32, mix(C_DIM, C_TEXT, 0.7f + 0.3f * f), m.name.c_str(), 0, 1300 - tx);
+        std::string sub = !m.artist.empty() ? m.artist : m.ext + "  \xC2\xB7  " + m.folder.substr(m.folder.rfind('/') + 1);
+        text(f_reg, 19, tx, cy + 4, C_FAINT, sub.c_str(), 0, 1300 - tx);
+        if (m.length_ms > 0)
+            text(f_semi, 22, 1792, cy - 14, C_DIM, format_time(m.length_ms).c_str(), 1);
+    }
+    dl->PopClipRect();
+    if (n == 0) {
+        icon_list(960, 470, 70, C_FAINT);
+        text(f_semi, 28, 960, 540, C_TEXT, "This playlist is empty", 0.5f);
+        text(f_reg, 21, 960, 584, C_DIM, "Open the Options menu on a video or song and choose Add to playlist", 0.5f);
+    }
+}
+
+/* The hint bar's buttons on the Playlists tab. */
+std::vector<std::pair<uint32_t, const char *>> playlist_hints()
+{
+    auto &pls = library_playlists();
+    if (pl_open.empty()) {
+        if (pl_focus == 0)
+            return { { PAD_CROSS, "Create" } };
+        std::vector<std::pair<uint32_t, const char *>> h = { { PAD_CROSS, "Open" }, { PAD_TRIANGLE, "Play" } };
+        if (pl_focus - 1 < (int)pls.size() && library_playlist_ours(pls[pl_focus - 1].path))
+            h.push_back({ PAD_SQUARE, "Delete" });
+        return h;
+    }
+    std::vector<std::pair<uint32_t, const char *>> h;
+    if (!pl_items.empty()) {
+        h = { { PAD_CROSS, "Play" }, { PAD_TRIANGLE, "Play all" } };
+        if (library_playlist_ours(pl_open)) {
+            h.push_back({ PAD_SQUARE, "Remove" });
+            h.push_back({ PAD_R2, "Move" });
+        }
+    }
+    h.push_back({ PAD_CIRCLE, "Back" });
+    return h;
 }
 
 void start_stream(const std::string &url, const std::vector<std::string> &options = {}, bool remember = true,
@@ -2092,6 +2493,8 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
         *type = m.ext == "ISO" ? "Disc image (ISO)" : m.ext == "DVD" ? "DVD (folder)" : "Blu-ray (folder)";
     } else if (e.item >= 0 && L()[e.item].archive) {
         *type = trf("Compressed (%s)", L()[e.item].ext.c_str());
+    } else if (e.item >= 0 && L()[e.item].other) {
+        *type = L()[e.item].ext.empty() ? std::string(tr("File")) : trf("%s file", L()[e.item].ext.c_str());
     } else if (e.item >= 0) {
         const MediaItem &m = L()[e.item];
         *type = m.text ? (m.ext == "NFO" || m.ext == "DIZ" ? trf("Release info (%s)", m.ext.c_str()) : std::string(tr("Text document")))
@@ -2119,6 +2522,8 @@ void classic_icon(const BrowseEntry &e, float cx, float cy, float s)
         ci_disc(cx, cy, s);
     else if (L()[e.item].archive)
         ci_zip(cx, cy, s);
+    else if (L()[e.item].other)
+        ci_file(cx, cy, s, 5);
     else
         ci_file(cx, cy, s, L()[e.item].text ? 3 : L()[e.item].image ? 4 : L()[e.item].audio ? 1 : 0);
 }
@@ -2441,7 +2846,7 @@ void tab_browse()
         }
         std::vector<int> list;
         for (const BrowseEntry &b : browse_entries)
-            if (b.item >= 0)
+            if (b.item >= 0 && (!L()[b.item].other || b.item == e.item)) /* "next" skips other files */
                 list.push_back(b.item);
         open_item(e.item, list);
     }
@@ -2465,14 +2870,14 @@ void tab_browse()
         return;
     }
     /* Breadcrumb: "Media › Movies", not the raw path. */
-    std::string crumb = "Sources";
+    std::string crumb = tr("Sources");
     bool in_archive = !net_path.empty() && net_path[0].first.compare(0, 7, "file://") == 0;
     if (!net_path.empty() && !in_archive)
-        crumb = "Network";
+        crumb = tr("Network");
     for (const std::string &r : library_roots()) {
         if ((!net_path.empty() && !in_archive) || browse_dir.compare(0, r.size(), r) != 0)
             continue;
-        crumb = r == library_media_dir() ? "Media" : r.substr(r.rfind('/') + 1);
+        crumb = r == library_media_dir() ? std::string(tr("Media")) : r.substr(r.rfind('/') + 1);
         std::string rest = browse_dir.substr(r.size());
         size_t p;
         while (!rest.empty() && (p = rest.find('/', 1)) != std::string::npos) {
@@ -2518,6 +2923,8 @@ void tab_browse()
             icon_list(146, y + 33, 30, C_DIM);
         else if (L()[e.item].archive)
             icon_folder(146, y + 33, 34, C_DIM);
+        else if (L()[e.item].other)
+            icon_list(146, y + 33, 30, C_FAINT);
         else
             icon_film(146, y + 33, 34, C_DIM);
         /* A file on a share: its name, the format in a badge (like local files). */
@@ -2559,7 +2966,7 @@ void tab_browse()
         text(f_reg, 24, 960, 476, C_DIM, trf("Connecting to %s\xE2\x80\xA6", tr(net_path.back().second.c_str())).c_str(), 0.5f, 1400);
     } else if (!net_path.empty() && net_list_state() == NET_FAILED) {
         text(f_semi, 26, 960, 400, C_TEXT, "Couldn't open this place", 0.5f);
-        text(f_reg, 22, 960, 446, C_DIM, net_list_error().c_str(), 0.5f, 1500);
+        text(f_reg, 22, 960, 446, C_DIM, vlc_message(net_list_error()).c_str(), 0.5f, 1500);
     } else if (!n) {
         text(f_reg, 24, 960, 400, C_DIM, net_path.empty() ? "Nothing here" : "This folder is empty", 0.5f);
     }
@@ -3083,6 +3490,157 @@ void modal_add_share()
     hints(1824, 1040, { { PAD_SQUARE, "Delete" }, { PAD_TRIANGLE, "Space" }, { PAD_R2, "Add" }, { PAD_CIRCLE, "Close" } }, a);
 }
 
+/* "Add to playlist": "New playlist" first, then the ones made in VLC. */
+std::string trimmed(std::string s);
+
+void open_playlist_pick(const std::string &file)
+{
+    pl_add_file = file;
+    modal = PL_PICK;
+    modal_focus = 0;
+    modal_anim = 0;
+}
+
+void open_playlist_name(const std::string &rename)
+{
+    pl_rename = rename;
+    const PlaylistFile *pl = rename.empty() ? nullptr : playlist_by_path(rename);
+    kb_open(pl ? pl->name : "", false);
+    in_list = false;
+    modal = PL_NAME;
+    modal_anim = 0;
+}
+
+void add_to_playlist(const std::string &playlist)
+{
+    const PlaylistFile *pl = playlist_by_path(playlist);
+    std::string name = pl ? pl->name : "";
+    if (library_playlist_add(playlist, pl_add_file))
+        toast(trf("Added to %s", name.c_str()), 2);
+    else
+        toast(trf("Already in %s", name.c_str()), 2);
+    if (playlist == pl_open)
+        pl_reload();
+}
+
+void modal_pl_pick()
+{
+    std::vector<const PlaylistFile *> ours;
+    for (const PlaylistFile &p : library_playlists())
+        if (library_playlist_ours(p.path))
+            ours.push_back(&p);
+    int n = 1 + (int)ours.size();
+    if (modal_focus >= n)
+        modal_focus = n - 1;
+    if (hit(PAD_UP) && n > 0)
+        modal_focus = (modal_focus + n - 1) % n;
+    if (hit(PAD_DOWN) && n > 0)
+        modal_focus = (modal_focus + 1) % n;
+    if (hit(PAD_CIRCLE)) {
+        modal = NONE;
+        return;
+    }
+    MediaItem *m = library_find(pl_add_file);
+    float a = ease(modal_anim);
+    dim_screen(a);
+    const float w = 640, row = 76;
+    int shown = std::min(n, 7);
+    float h = 150 + shown * row + 70;
+    float x = 960 - w / 2, y = 540 - h / 2 + (1 - a) * 40;
+    panel(x, y, w, h, a);
+    text(f_bold, 30, x + 40, y + 30, alpha(C_TEXT, a), "Add to playlist");
+    if (m)
+        text(f_reg, 21, x + 40, y + 74, alpha(C_DIM, a), m->name.c_str(), 0, w - 80);
+    int first = std::max(0, std::min(modal_focus - shown / 2, n - shown));
+    for (int k = 0; k < shown; k++) {
+        int i = first + k;
+        float ry = y + 120 + k * row;
+        const char *label = i == 0 ? tr("New playlist") : ours[i - 1]->name.c_str();
+        float f = focus_anim(hash_id(i == 0 ? "+new" : ours[i - 1]->path, 950), i == modal_focus, 14);
+        if (classic_look) {
+            sel_box(x + 20, ry, w - 40, row - 10, f * a);
+        } else if (f > 0.01f) {
+            glow(x + 20, ry, w - 40, row - 10, 16, alpha(C_ORANGE, 0.35f * f * a), 12, 6);
+            rect(x + 20, ry, w - 40, row - 10, alpha(C_CARD_HI, f * a), 16);
+        }
+        ImU32 ic = alpha(f > 0.5f ? IM_COL32(255, 255, 255, 255) : C_DIM, a);
+        if (!classic_look)
+            rect(x + 36, ry + 9, 48, 48, alpha(mix(IM_COL32(255, 255, 255, 14), C_ORANGE, 0.85f * f), a), 13);
+        if (i == 0)
+            icon_plus_circle(x + 60, ry + 33, 28, ic);
+        else
+            icon_list(x + 60, ry + 33, 26, ic);
+        text(f_semi, 24, x + 104, ry + 19, alpha(mix(C_DIM, C_TEXT, 0.55f + 0.45f * f), a), label, 0, w - 140);
+    }
+    hints(x + w - 40, y + h - 40, { { PAD_CROSS, "Add" }, { PAD_CIRCLE, "Cancel" } }, a);
+    if (hit(PAD_CROSS)) {
+        if (modal_focus == 0) {
+            open_playlist_name("");
+        } else {
+            add_to_playlist(ours[modal_focus - 1]->path);
+            modal = NONE;
+        }
+    }
+}
+
+/* A playlist's name, typed: a new one (and the file waiting to go in), or a
+ * new name for one. */
+void modal_pl_name()
+{
+    float a = ease(modal_anim);
+    screen_backdrop(a);
+    const float x = 260, w = 1400;
+    text(f_bold, 36, x, classic_look ? 32 : 64, alpha(C_TEXT, a), pl_rename.empty() ? "New playlist" : "Rename playlist");
+    text_box(x, 128, w, "Name the playlist", a, true);
+    MediaItem *m = pl_add_file.empty() ? nullptr : library_find(pl_add_file);
+    if (m)
+        text(f_reg, 22, x, 248, alpha(C_DIM, a), trf("%s goes in first", m->name.c_str()).c_str(), 0, w);
+    else
+        text(f_reg, 22, x, 248, alpha(C_DIM, a), "Saved in the media folder's Playlists, as a file VLC on a computer opens too", 0, w);
+    bool done = kb_frame(x, 640, w, true, a, nullptr);
+    if (done) {
+        std::string t = trimmed(kb.text);
+        if (t.empty()) {
+            toast("Type a name", 2.5);
+        } else if (pl_rename.empty()) {
+            std::string path = library_playlist_create(t);
+            if (path.empty()) {
+                toast("A playlist with this name is already there, or the disk can't be written", 3);
+            } else {
+                modal = NONE;
+                if (!pl_add_file.empty()) {
+                    add_to_playlist(path);
+                } else {
+                    toast(trf("Made %s", t.c_str()), 2);
+                    tab = PLAYLISTS; /* and on it */
+                    pl_open.clear();
+                    for (int i = 0; i < (int)library_playlists().size(); i++)
+                        if (library_playlists()[i].path == path)
+                            pl_focus = i + 1;
+                }
+                rebuild_browse();
+                return;
+            }
+        } else {
+            std::string path = library_playlist_rename(pl_rename, t);
+            if (path.empty()) {
+                toast("A playlist with this name is already there, or the disk can't be written", 3);
+            } else {
+                if (pl_open == pl_rename)
+                    pl_open = path;
+                modal = NONE;
+                rebuild_browse();
+                return;
+            }
+        }
+    }
+    if (hit(PAD_CIRCLE)) {
+        modal = NONE;
+        return;
+    }
+    hints(1824, 1040, { { PAD_SQUARE, "Delete" }, { PAD_TRIANGLE, "Space" }, { PAD_R2, "Save" }, { PAD_CIRCLE, "Cancel" } }, a);
+}
+
 /* Text cut into lines that fit max_w; returns the height used. */
 float text_wrapped(ImFont *f, float size, float x, float y, ImU32 col, const std::string &s_in, float max_w, int max_lines)
 {
@@ -3175,8 +3733,8 @@ void modal_login()
     float a = ease(modal_anim);
     screen_backdrop(a);
     const float x = 260, w = 1400;
-    text(f_bold, 36, x, classic_look ? 32 : 56, alpha(C_TEXT, a), ask.title.empty() ? "Sign in" : ask.title.c_str(), 0, w);
-    text_wrapped(f_reg, 22, x, 112, alpha(C_DIM, a), ask.text, w, 3);
+    text(f_bold, 36, x, classic_look ? 32 : 56, alpha(C_TEXT, a), ask.title.empty() ? "Sign in" : vlc_message(ask.title).c_str(), 0, w);
+    text_wrapped(f_reg, 22, x, 112, alpha(C_DIM, a), vlc_message(ask.text), w, 3);
     /* the field being typed in holds kb.text */
     (login_field == 0 ? login_user : login_pass) = kb.text;
     field_box(x, 210, (w - 40) / 2, "User name", login_user, false, login_field == 0, a);
@@ -3237,8 +3795,8 @@ void modal_question()
     dim_screen(a);
     float w = 1100, h = 440, x = 960 - w / 2, y = 540 - h / 2 + (1 - a) * 40;
     panel(x, y, w, h, a);
-    text(f_bold, 30, x + 48, y + 40, alpha(C_TEXT, a), ask.title.c_str(), 0, w - 96);
-    text_wrapped(f_reg, 21, x + 48, y + 96, alpha(C_DIM, a), ask.text, w - 96, 6);
+    text(f_bold, 30, x + 48, y + 40, alpha(C_TEXT, a), vlc_message(ask.title).c_str(), 0, w - 96);
+    text_wrapped(f_reg, 21, x + 48, y + 96, alpha(C_DIM, a), vlc_message(ask.text), w - 96, 6);
     float bw = (w - 96 - (nb - 1) * 24) / nb;
     for (int i = 0; i < nb; i++) {
         float bx = x + 48 + i * (bw + 24), by = y + h - 120;
@@ -3702,7 +4260,7 @@ void modal_text_screen()
             } else {
                 std::vector<int> list;
                 for (const Found &x2 : found)
-                    if (x2.item >= 0)
+                    if (x2.item >= 0 && (!L()[x2.item].other || x2.item == r.item))
                         list.push_back(x2.item);
                 open_item(r.item, list);
             }
@@ -3793,15 +4351,14 @@ void modal_about()
     rect(tx, cy + 14, tw, 1, alpha(IM_COL32(255, 255, 255, 24), a));
     text(f_semi, 19, tx, cy + 34, alpha(C_DIM, a), "Built with");
     text_wrapped(f_reg, 18, tx, cy + 64, alpha(C_FAINT, a),
-                 "FFmpeg 8.1.2, dav1d 1.5.4, libmatroska 1.7.2, libebml 1.4.6, libdvbpsi 1.3.3, libass 0.17.5, "
+                 std::string("FFmpeg 8.1.2, dav1d 1.5.4, libmatroska 1.7.2, libebml 1.4.6, libdvbpsi 1.3.3, libass 0.17.5, "
                  "FreeType 2.13.3, HarfBuzz 10.4.0, FriBidi 1.0.16, GnuTLS 3.8.13, Nettle 3.10.2, GMP 6.3.0, "
                  "libsmb2 6.1, libupnp 1.14.31, libxml2 2.15.3, libdvdread 6.1.3, libdvdnav 6.1.1, libbluray 1.4.1, "
-                 "libarchive 3.8.9, zlib 1.3.1, Mesa RADV (Vulkan), Dear ImGui 1.92.9, stb_image. "
-                 "Fonts: Selawik, Inter, Noto, DejaVu (OFL). TV lists: iptv-org. Radio: radio-browser.info. "
-                 "Subtitles: OpenSubtitles.com.",
+                 "libarchive 3.8.9, zlib 1.3.1, Mesa RADV (Vulkan), Dear ImGui 1.92.9, stb_image. ") +
+                     tr("Fonts: Selawik, Inter, Noto, DejaVu (OFL). TV lists: iptv-org. Radio: radio-browser.info. Subtitles: OpenSubtitles.com."),
                  tw, 6);
     text(f_reg, 17, tx, y + h - 52, alpha(C_FAINT, a),
-         "GPLv2+. An unofficial port, not affiliated with VideoLAN or Sony.", 0, tw);
+         "GPL-3.0. An unofficial port, not affiliated with VideoLAN or Sony.", 0, tw);
     hints(x + w - 40, y + h - 40, { { PAD_CIRCLE, "Close" } }, a);
     if (hit(PAD_CIRCLE) || hit(PAD_CROSS)) {
         modal = info_back;
@@ -3812,7 +4369,8 @@ void modal_about()
 
 /* Options (the OPTIONS button): a few actions, each with its icon. The
  * choices live in Settings. */
-enum { OI_SETTINGS, OI_RESCAN, OI_RESUME, OI_TRACKS, OI_STOP, OI_PHONE, OI_SEARCH, OI_LINK };
+enum { OI_SETTINGS, OI_RESCAN, OI_RESUME, OI_TRACKS, OI_STOP, OI_PHONE, OI_SEARCH, OI_LINK, OI_ADD_PL, OI_RENAME_PL,
+       OI_DELETE_PL };
 
 void icon_search(float cx, float cy, float s, ImU32 col)
 {
@@ -3847,6 +4405,8 @@ void option_icon(int icon, float cx, float cy, float s, ImU32 col)
     case OI_PHONE: icon_phone(cx, cy, s, col); break;
     case OI_SEARCH: icon_search(cx, cy, s, col); break;
     case OI_LINK: icon_link(cx, cy, s, col); break;
+    case OI_ADD_PL: icon_plus_circle(cx, cy, s * 0.95f, col); break;
+    case OI_RENAME_PL: icon_list(cx, cy, s * 0.9f, col); break;
     default: rect(cx - s * 0.26f, cy - s * 0.26f, s * 0.52f, s * 0.52f, col, s * 0.08f); break;
     }
 }
@@ -3861,11 +4421,29 @@ void modal_options()
     std::vector<Item> items;
     if (in_player)
         items = { { "Resume", OI_RESUME }, { "Audio, subtitles and more", OI_TRACKS },
-                  { "Phone remote", OI_PHONE }, { "Settings", OI_SETTINGS }, { "Stop playback", OI_STOP } };
+                  { "Send files from a phone or PC", OI_PHONE }, { "Settings", OI_SETTINGS }, { "Stop playback", OI_STOP } };
     else
         items = { { "Search", OI_SEARCH }, { "Open a network link", OI_LINK },
-                  { "Send files from a phone", OI_PHONE }, { "Settings", OI_SETTINGS },
+                  { "Send files from a phone or PC", OI_PHONE }, { "Settings", OI_SETTINGS },
                   { "Rescan media", OI_RESCAN } };
+    /* the file in front of you: into a playlist */
+    int target = in_player ? current_item() : focused_item();
+    std::string pl_target; /* Playlists tab: the one opened or selected */
+    if (!in_player && tab == PLAYLISTS) {
+        if (!pl_open.empty())
+            pl_target = pl_open;
+        else if (pl_focus > 0 && pl_focus - 1 < (int)library_playlists().size())
+            pl_target = library_playlists()[pl_focus - 1].path;
+        if (!library_playlist_ours(pl_target))
+            pl_target.clear();
+    }
+    if (target >= 0 && !L()[target].other && !L()[target].text && !L()[target].archive && !L()[target].image &&
+        !is_link(L()[target].path))
+        items.insert(items.begin() + 1, { "Add to playlist", OI_ADD_PL });
+    if (!pl_target.empty()) {
+        items.insert(items.begin(), { "Delete playlist", OI_DELETE_PL });
+        items.insert(items.begin(), { "Rename playlist", OI_RENAME_PL });
+    }
     int n = (int)items.size();
     if (modal_focus >= n)
         modal_focus = n - 1;
@@ -3937,6 +4515,16 @@ void modal_options()
     case OI_STOP:
         leave_player(false);
         break;
+    case OI_ADD_PL:
+        open_playlist_pick(L()[target].path);
+        break;
+    case OI_RENAME_PL:
+        pl_add_file.clear();
+        open_playlist_name(pl_target);
+        break;
+    case OI_DELETE_PL:
+        ask_delete(pl_target, NONE);
+        break;
     default: /* Resume */
         break;
     }
@@ -3996,7 +4584,7 @@ const char *const st_help[ST_COUNT] = {
     "VLC for PS5 v" VLC_PS5_VERSION ", VLC media player 3.0.24",
     "Starts VLC again: it then sees drives plugged in since (when sandboxed)",
     "Version, credits and licences",
-    "The page that sends files and works as a remote, on your home network",
+    "The page that sends files and takes your OpenSubtitles key, on your home network",
     "Classic: panels and folders like a desktop player. Modern: black, VLC 4 style. VLC restarts",
     "Your own free OpenSubtitles API key (and account), here or from the phone page",
     "The language of VLC's menus",
@@ -4535,7 +5123,7 @@ void modal_phone()
     panel(x, y, w, h, a);
     rect(x + 48, y + 48, 64, 64, alpha(C_ORANGE, a), 16);
     icon_phone(x + 80, y + 80, 40, alpha(IM_COL32(255, 255, 255, 255), a));
-    text(f_bold, 32, x + 136, y + 62, alpha(C_TEXT, a), "Send files from your phone");
+    text(f_bold, 32, x + 136, y + 62, alpha(C_TEXT, a), "Send files from your phone or PC");
     if (!web_running()) {
         text(f_reg, 24, x + 48, y + 160, alpha(C_DIM, a), "Phone access is off. Turn it on in Settings > System.", 0, w - 96);
     } else if (url.empty()) {
@@ -4545,7 +5133,7 @@ void modal_phone()
         rect(x + 48, y + 200, w - 96, 96, alpha(C_CARD_HI, a), 18);
         text(f_bold, 44, x + w / 2, y + 222, alpha(C_ORANGE, a), url.c_str(), 0.5f, w - 140);
         static const char *const what[] = { "Send videos, music and subtitles to the PS5",
-                                            "Use it as a remote while something plays" };
+                                            "Add your OpenSubtitles API key" };
         for (int i = 0; i < 2; i++) {
             float ly = y + 330 + i * 42;
             circle(x + 58, ly + 14, 5, alpha(C_ORANGE, a));
@@ -4565,61 +5153,21 @@ void modal_phone()
     hints(x + w - 40, y + h - 36, { { PAD_CIRCLE, "Close" } }, a);
 }
 
-/* The page's view of the player, its buttons, and files that arrived. */
+/* The page's subtitle-download card, and what arrived from it. */
 void web_frame()
 {
     static double next_status;
     if (now >= next_status) {
-        next_status = now + 0.25;
-        WebStatus st = {};
-        st.playing = screen == PLAYER && !playing_path.empty();
-        if (st.playing) {
-            st.paused = player_paused() || ended;
-            st.title = playing_name;
-            st.time_ms = player_time();
-            st.length_ms = player_length();
-        }
-        st.volume = player_volume();
-        st.loop = loop_on();
-        web_set_status(st);
-    }
-    WebCommand c;
-    while (web_next_command(&c)) {
-        if (screen != PLAYER)
-            continue;
-        switch (c.kind) {
-        case WEB_TOGGLE:
-            if (ended) {
-                int item = current_item();
-                if (item >= 0)
-                    restart_playing(item);
-            } else {
-                player_toggle_pause();
-                pulse_anim = 1;
-                pulse_paused = !player_paused();
-            }
-            break;
-        case WEB_JUMP:
-            player_seek(player_time() + c.value);
-            last_seek_at = now;
-            osd_until = now + 3;
-            break;
-        case WEB_SEEK:
-            player_seek(c.value);
-            last_seek_at = now;
-            osd_until = now + 3;
-            break;
-        case WEB_NEXT: play_neighbour(1); break;
-        case WEB_PREV: play_neighbour(-1); break;
-        case WEB_VOLUME: {
-            player_set_volume(player_volume() + (int)c.value);
-            char msg[32];
-            snprintf(msg, sizeof(msg), tr("Volume %d%%"), player_volume());
-            toast(msg, 1);
-            break;
-        }
-        case WEB_STOP: leave_player(false); break;
-        }
+        next_status = now + 0.5;
+        WebOsubInfo info;
+        info.has_key = osub_has_key();
+        /* the key check as the TV saw it (osub_state() hands a result over
+         * once: asking here would take it from the TV) */
+        info.checking = os_checking;
+        info.failed = !os_checking && !os_status.empty() && !os_status_ok;
+        info.user = pref_str("osub_user", "");
+        info.message = os_checking ? "" : os_status;
+        web_set_osub_info(info);
     }
     std::string ok_key, ok_user, ok_pass;
     if (web_take_opensubtitles(&ok_key, &ok_user, &ok_pass)) {
@@ -4628,13 +5176,13 @@ void web_frame()
         pref_set("osub_pass", ok_pass);
         if (modal == OSUB_SETUP)
             open_osub_setup(os_back); /* the form shows what arrived */
-        toast("OpenSubtitles key received from your phone", 3);
+        toast("OpenSubtitles key received from your phone or PC", 3);
         osub_check();
     }
     if (modal != OSUB_SETUP && modal != OSUB_RESULTS)
         osub_check_tick();
     if (web_take_finished()) {
-        toast("A file arrived from your phone", 2.5);
+        toast("A file arrived from your phone or PC", 2.5);
         if (screen != PLAYER) {
             library_rescan();
             rebuild_lists();
@@ -6323,7 +6871,7 @@ void player_screen()
     if (!v.audio_codec.empty()) {
         meta += (meta.empty() ? "" : "  \xC2\xB7  ") + v.audio_codec;
         if (v.audio_channels)
-            meta += v.audio_channels == 6 ? " 5.1" : v.audio_channels == 8 ? " 7.1" : v.audio_channels == 2 ? " stereo" : "";
+            meta += v.audio_channels == 6 ? " 5.1" : v.audio_channels == 8 ? " 7.1" : v.audio_channels == 2 ? " " + std::string(tr("stereo")) : "";
     }
     {
         std::vector<Chapter> ch = player_chapters();
@@ -7064,6 +7612,7 @@ void ui_frame(const PadState &pad, float frame_dt)
         case HOME: tab_home(); break;
         case VIDEOS: tab_videos(); break;
         case MUSIC: tab_music(); break;
+        case PLAYLISTS: tab_playlists(); break;
         case BROWSE: tab_browse(); break;
         default: break;
         }
@@ -7074,7 +7623,9 @@ void ui_frame(const PadState &pad, float frame_dt)
                              (browse_entries[browse_focus].dir || browse_entries[browse_focus].net == NET_ADD);
             std::vector<std::pair<uint32_t, const char *>> h = { { PAD_CROSS, open_kind ? "Open" : "Play" } };
             int fi = focused_item();
-            if (fi >= 0) {
+            if (fi >= 0 && L()[fi].other) {
+                h = { { PAD_SQUARE, "Details" } };
+            } else if (fi >= 0) {
                 h.push_back({ PAD_TRIANGLE, L()[fi].favourite ? "Unfavourite" : "Favourite" });
                 h.push_back({ PAD_SQUARE, "Details" });
             } else if (tab == BROWSE && browse_focus < (int)browse_entries.size() &&
@@ -7087,10 +7638,15 @@ void ui_frame(const PadState &pad, float frame_dt)
             }
             if (tab == BROWSE && (!browse_dir.empty() || !net_path.empty()))
                 h.push_back({ PAD_CIRCLE, "Back" });
+            if (tab == PLAYLISTS)
+                h = playlist_hints();
             h.push_back({ PAD_R3, "Search" });
             h.push_back({ PAD_OPTIONS, "Options" });
             if (classic_look) {
-                if (tab != BROWSE) {
+                if (tab == PLAYLISTS) {
+                    if (pl_open.empty())
+                        status_text = trf("%d playlists", (int)library_playlists().size());
+                } else if (tab != BROWSE) {
                     char st[64];
                     if (tab == VIDEOS)
                         snprintf(st, sizeof(st), tr("%zu videos"), videos_list.size());
@@ -7128,6 +7684,8 @@ void ui_frame(const PadState &pad, float frame_dt)
         case RESUME: modal_resume(); break;
         case INFO: modal_info(); break;
         case DETAILS: modal_details(); break;
+        case PL_PICK: modal_pl_pick(); break;
+        case PL_NAME: modal_pl_name(); break;
         case SETTINGS: modal_settings(); break;
         case SPEAKERS: modal_speakers(); break;
         case PHONE: modal_phone(); break;

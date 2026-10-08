@@ -44,8 +44,9 @@ uint64_t gfx_completed_frame();
 uint32_t gfx_memory_type(uint32_t type_bits, VkMemoryPropertyFlags flags);
 bool gfx_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags flags,
                 VkBuffer *buffer, VkDeviceMemory *memory, void **mapped);
+/* mips: levels made and seen by the view (the caller fills them). */
 bool gfx_image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage, VkImage *image,
-               VkDeviceMemory *memory, VkImageView *view);
+               VkDeviceMemory *memory, VkImageView *view, uint32_t mips = 1);
 VkShaderModule gfx_shader(const uint32_t *code, size_t size);
 /* Runs commands now and waits (set-up only). */
 VkCommandBuffer gfx_one_shot_begin();

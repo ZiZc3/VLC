@@ -42,6 +42,7 @@
 #include "gen/video_vert.h"
 #include "gfx.h"
 #include "image.h"
+#include "lang.h"
 #include "platform.h"
 #include "prefs.h"
 
@@ -583,8 +584,13 @@ void read_info()
 std::vector<Track> tracks_from(libvlc_track_description_t *list)
 {
     std::vector<Track> out;
-    for (libvlc_track_description_t *t = list; t; t = t->p_next)
-        out.push_back({ t->i_id, t->psz_name ? t->psz_name : "Track" });
+    for (libvlc_track_description_t *t = list; t; t = t->p_next) {
+        /* VLC names a track without a title "Track 1": said in the menus' language */
+        std::string name = t->psz_name ? t->psz_name : "";
+        if (name.compare(0, 6, "Track ") == 0 && name.size() > 6 && isdigit((unsigned char)name[6]))
+            name = trf("Track %d", atoi(name.c_str() + 6));
+        out.push_back({ t->i_id, name.empty() ? std::string(tr("Track")) : name });
+    }
     if (list)
         libvlc_track_description_list_release(list);
     return out;
@@ -1671,7 +1677,7 @@ std::vector<Chapter> player_chapters()
     int n = libvlc_media_player_get_full_chapter_descriptions(mp, -1, &d);
     for (int i = 0; i < n; i++) {
         char fallback[32];
-        snprintf(fallback, sizeof(fallback), "Chapter %d", i + 1);
+        snprintf(fallback, sizeof(fallback), tr("Chapter %d"), i + 1);
         chapters_cache.push_back({ d[i]->i_time_offset,
                                    d[i]->psz_name && *d[i]->psz_name ? d[i]->psz_name : fallback });
     }

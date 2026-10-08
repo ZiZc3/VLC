@@ -6,10 +6,13 @@
 #include "lang.h"
 
 #include <atomic>
+#include <mutex>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <fribidi/fribidi.h>
@@ -170,7 +173,20 @@ const char *tr(const char *english)
     if (!t)
         return english;
     auto it = t->find(english);
-    return it == t->end() ? english : it->second.c_str();
+    if (it == t->end()) {
+        /* Test aid (the host build with VLCPS5_LANG_MISSES set): each string
+         * drawn that this language lacks, once, so a tour finds them all. */
+        static const bool log_misses = getenv("VLCPS5_LANG_MISSES") != nullptr;
+        if (log_misses) {
+            static std::mutex m;
+            static std::unordered_set<std::string> said;
+            std::lock_guard<std::mutex> g(m);
+            if (said.insert(english).second)
+                fprintf(stderr, "lang-miss: %s\n", english);
+        }
+        return english;
+    }
+    return it->second.c_str();
 }
 
 std::string trf(const char *english_format, ...)

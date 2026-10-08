@@ -29,6 +29,7 @@
 
 #include "backends/imgui_impl_vulkan.h"
 #include "gfx.h"
+#include "lang.h"
 #include "platform.h"
 #include "player.h"
 
@@ -129,6 +130,17 @@ bool has_file(const std::string &path)
     return stat(path.c_str(), &st) == 0;
 }
 
+/* What a scan passed over, for the log: "(folder too deep) 1". */
+std::map<std::string, int> skipped;
+int archives_found, others_found;
+
+/* Folders a drive keeps for the system, never media. */
+bool system_folder(const char *name)
+{
+    return !strcmp(name, "System Volume Information") || !strcmp(name, "$RECYCLE.BIN") ||
+           !strcmp(name, "lost+found") || !strcmp(name, "sce_sys") || !strcmp(name, "sce_module");
+}
+
 void scan_dir(const std::string &dir, int depth)
 {
     /* A disc copied as a folder (VIDEO_TS, BDMV): one item, not its files. */
@@ -156,23 +168,32 @@ void scan_dir(const std::string &dir, int depth)
             continue;
         std::string path = dir + "/" + e->d_name;
         struct stat st;
-        if (stat(path.c_str(), &st) != 0)
+        if (stat(path.c_str(), &st) != 0) {
+            skipped["(can't read)"]++;
             continue;
+        }
         if (S_ISDIR(st.st_mode)) {
+            if (system_folder(e->d_name))
+                continue;
             if (depth < 4)
                 scan_dir(path, depth + 1);
+            else
+                skipped["(folder too deep)"]++;
             continue;
         }
         const char *dot = strrchr(e->d_name, '.');
         if (!dot)
-            continue;
-        if (has_ext(dot + 1, playlist_exts)) {
+            dot = e->d_name + strlen(e->d_name); /* no extension: "" */
+        if (!strcasecmp(dot, ".part"))
+            continue; /* a file still arriving from the phone page */
+        if (*dot && has_ext(dot + 1, playlist_exts)) {
             playlists.push_back({ path, tidy_name(e->d_name), dir });
             continue;
         }
-        bool video = has_ext(dot + 1, video_exts), audio = has_ext(dot + 1, audio_exts);
-        bool image = has_ext(dot + 1, image_exts), text = has_ext(dot + 1, text_exts);
-        bool archive = has_ext(dot + 1, archive_exts), iso = !strcasecmp(dot + 1, "iso");
+        const char *x = *dot ? dot + 1 : dot;
+        bool video = has_ext(x, video_exts), audio = has_ext(x, audio_exts);
+        bool image = has_ext(x, image_exts), text = has_ext(x, text_exts);
+        bool archive = has_ext(x, archive_exts), iso = !strcasecmp(x, "iso");
         if (image) {
             /* an album's cover file isn't a photo of its own */
             std::string base = std::string(e->d_name, dot - e->d_name);
@@ -181,12 +202,14 @@ void scan_dir(const std::string &dir, int depth)
             if (base == "cover" || base == "folder" || base == "front" || base.compare(0, 8, "albumart") == 0)
                 continue;
         }
-        if (!video && !audio && !image && !text && !archive && !iso)
-            continue;
+        /* Everything else shows in Browse too: what VLC can't play says so. */
+        bool other = !video && !audio && !image && !text && !archive && !iso;
+        archives_found += archive;
+        others_found += other;
         MediaItem m = {};
         m.path = path;
-        m.name = tidy_name(e->d_name);
-        m.ext = dot + 1;
+        m.name = *dot ? tidy_name(e->d_name) : tidy_name(std::string(e->d_name) + ".x");
+        m.ext = x;
         for (char &c : m.ext)
             c = (char)toupper((unsigned char)c);
         m.folder = dir;
@@ -194,6 +217,7 @@ void scan_dir(const std::string &dir, int depth)
         m.image = image;
         m.text = text;
         m.archive = archive;
+        m.other = other;
         m.disc = iso;
         m.size = st.st_size;
         m.mtime = st.st_mtime;
@@ -822,7 +846,7 @@ void details_main(std::string path, int64_t size, std::string ext)
                 if (!lang.empty())
                     val += " (" + lang + ")";
                 char label[32];
-                snprintf(label, sizeof(label), "Audio %d", ++audio_no);
+                snprintf(label, sizeof(label), tr("Audio %d"), ++audio_no);
                 d.rows.push_back({ label, val });
             } else if (t[i]->i_type == libvlc_track_text) {
                 sub_no++;
@@ -856,35 +880,86 @@ void apply_resumes()
 
 /* ---- textures ----------------------------------------------------------------------- */
 
+/* The next smaller level of a BGRA picture: each pixel the mean of 2x2. */
+std::vector<uint8_t> half_size(const std::vector<uint8_t> &src, uint32_t w, uint32_t h, uint32_t *nw, uint32_t *nh)
+{
+    *nw = std::max(1u, w / 2);
+    *nh = std::max(1u, h / 2);
+    std::vector<uint8_t> out((size_t)*nw * *nh * 4);
+    for (uint32_t y = 0; y < *nh; y++) {
+        const uint8_t *r0 = &src[(size_t)std::min(2 * y, h - 1) * w * 4];
+        const uint8_t *r1 = &src[(size_t)std::min(2 * y + 1, h - 1) * w * 4];
+        uint8_t *o = &out[(size_t)y * *nw * 4];
+        for (uint32_t x = 0; x < *nw; x++) {
+            uint32_t x0 = std::min(2 * x, w - 1) * 4, x1 = std::min(2 * x + 1, w - 1) * 4;
+            for (int c = 0; c < 4; c++)
+                o[x * 4 + c] = (uint8_t)((r0[x0 + c] + r0[x1 + c] + r1[x0 + c] + r1[x1 + c] + 2) / 4);
+        }
+    }
+    return out;
+}
+
+/* A picture as a texture. Thumbnails (and covers) get every smaller level
+ * too: drawn small (a playlist row, a Music cover) a 480-wide picture
+ * sampled once a pixel shimmered; the levels make it smooth at any size.
+ * Big photos are drawn near their size and keep one level. */
 ImTextureID make_texture(const Finished &t)
 {
     if (!thumb_sampler) {
         VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        si.minLod = 0;
+        si.maxLod = VK_LOD_CLAMP_NONE;
         si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         vkCreateSampler(gfx.device, &si, nullptr, &thumb_sampler);
+    }
+    /* the levels, one after another in the staging buffer */
+    std::vector<std::vector<uint8_t>> made;
+    made.reserve(12);
+    std::vector<VkBufferImageCopy> regions;
+    VkDeviceSize total = t.bgra.size();
+    regions.push_back({});
+    regions[0].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    regions[0].imageExtent = { t.w, t.h, 1 };
+    if (t.w <= 1024 && t.h <= 1024) {
+        uint32_t w = t.w, h = t.h;
+        const std::vector<uint8_t> *src = &t.bgra;
+        while ((w > 1 || h > 1) && regions.size() < 12) {
+            uint32_t nw, nh;
+            made.push_back(half_size(*src, w, h, &nw, &nh));
+            src = &made.back();
+            w = nw;
+            h = nh;
+            VkBufferImageCopy r = {};
+            r.bufferOffset = total;
+            r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)regions.size(), 0, 1 };
+            r.imageExtent = { w, h, 1 };
+            regions.push_back(r);
+            total += made.back().size();
+        }
     }
     Texture tex;
     if (!gfx_image(t.w, t.h, VK_FORMAT_B8G8R8A8_UNORM,
                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &tex.image,
-                   &tex.memory, &tex.view))
+                   &tex.memory, &tex.view, (uint32_t)regions.size()))
         return 0;
     VkBuffer staging;
     VkDeviceMemory staging_mem;
     void *mapped;
-    if (!gfx_buffer(t.bgra.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    if (!gfx_buffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                     &staging, &staging_mem, &mapped))
         return 0;
     memcpy(mapped, t.bgra.data(), t.bgra.size());
+    for (size_t i = 0; i < made.size(); i++)
+        memcpy((uint8_t *)mapped + regions[i + 1].bufferOffset, made[i].data(), made[i].size());
     VkCommandBuffer cmd = gfx_one_shot_begin();
     gfx_barrier(cmd, tex.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkBufferImageCopy region = {};
-    region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    region.imageExtent = { t.w, t.h, 1 };
-    vkCmdCopyBufferToImage(cmd, staging, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, staging, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           (uint32_t)regions.size(), regions.data());
     gfx_barrier(cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -984,6 +1059,8 @@ void scan()
     items.clear();
     playlists.clear();
     roots.clear();
+    skipped.clear();
+    archives_found = others_found = 0;
     roots.push_back(media_dir);
     scan_dir(media_dir, 0);
     for (const char *const *r = plat_media_roots(); *r; r++) {
@@ -1012,7 +1089,7 @@ void scan()
         m.favourite = std::find(favourites.begin(), favourites.end(), m.path) != favourites.end();
     std::vector<Job> todo;
     for (MediaItem &m : items) {
-        if (m.text || m.archive || m.disc)
+        if (m.text || m.archive || m.disc || m.other)
             continue; /* no picture to make (a disc's menu is its picture) */
         auto k = known.find(thumb_file(m));
         if (k != known.end()) {
@@ -1044,6 +1121,11 @@ void scan()
     last_signature = watch_signature();
     fprintf(stderr, "library: %zu files in %zu folders, %zu to look at\n", items.size(),
             roots.size(), todo.size());
+    std::string passed;
+    for (auto &k : skipped)
+        passed += (passed.empty() ? "" : ", ") + k.first + " " + std::to_string(k.second);
+    fprintf(stderr, "library: %d archives, %d other files; passed over: %s\n", archives_found,
+            others_found, passed.empty() ? "nothing" : passed.c_str());
 }
 
 } // namespace
@@ -1354,6 +1436,159 @@ std::vector<int> library_playlist_items(const std::string &path)
     }
     fclose(f);
     return out;
+}
+
+/* ---- playlists made in VLC -------------------------------------------------------- */
+
+namespace {
+
+std::string playlist_dir()
+{
+    return media_dir + "/Playlists";
+}
+
+/* A name that can be a file name everywhere (FAT/exFAT drives, Windows). */
+std::string playlist_file_name(const std::string &name)
+{
+    std::string n;
+    for (char c : name)
+        n += strchr("/\\:*?\"<>|", c) || (unsigned char)c < 32 ? '-' : c;
+    while (!n.empty() && (n.back() == ' ' || n.back() == '.'))
+        n.pop_back();
+    while (!n.empty() && n[0] == ' ')
+        n.erase(0, 1);
+    return n.substr(0, 120);
+}
+
+/* The files of one of ours, in order. */
+std::vector<std::string> playlist_read(const std::string &path)
+{
+    std::vector<std::string> out;
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f)
+        return out;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        std::string l = line;
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r'))
+            l.pop_back();
+        if (l.size() >= 3 && (unsigned char)l[0] == 0xEF)
+            l = l.substr(3);
+        if (!l.empty() && l[0] != '#')
+            out.push_back(l);
+    }
+    fclose(f);
+    return out;
+}
+
+/* Written whole to a temporary file, then put in place. */
+bool playlist_write(const std::string &path, const std::vector<std::string> &files)
+{
+    std::string tmp = path + ".tmp";
+    FILE *f = fopen(tmp.c_str(), "w");
+    if (!f)
+        return false;
+    bool ok = fputs("#EXTM3U\n", f) >= 0;
+    for (const std::string &p : files) {
+        std::string name = p.substr(p.rfind('/') + 1);
+        ok = ok && fprintf(f, "#EXTINF:-1,%s\n%s\n", tidy_name(name).c_str(), p.c_str()) > 0;
+    }
+    ok = fclose(f) == 0 && ok;
+    if (ok)
+        ok = rename(tmp.c_str(), path.c_str()) == 0;
+    if (!ok)
+        unlink(tmp.c_str());
+    return ok;
+}
+
+void playlists_sort()
+{
+    std::sort(playlists.begin(), playlists.end(), [](const PlaylistFile &a, const PlaylistFile &b) {
+        return strcasecmp(a.name.c_str(), b.name.c_str()) < 0;
+    });
+}
+
+} // namespace
+
+bool library_playlist_ours(const std::string &path)
+{
+    std::string d = playlist_dir() + "/";
+    return path.compare(0, d.size(), d) == 0 && path.size() > 5 &&
+           !strcasecmp(path.c_str() + path.size() - 5, ".m3u8");
+}
+
+std::string library_playlist_create(const std::string &name)
+{
+    std::string n = playlist_file_name(name);
+    if (n.empty())
+        return "";
+    mkdir(playlist_dir().c_str(), 0777);
+    std::string path = playlist_dir() + "/" + n + ".m3u8";
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0 || !playlist_write(path, {}))
+        return "";
+    playlists.push_back({ path, tidy_name(n + ".m3u8"), playlist_dir() });
+    playlists_sort();
+    return path;
+}
+
+bool library_playlist_add(const std::string &playlist, const std::string &file)
+{
+    std::vector<std::string> files = playlist_read(playlist);
+    if (std::find(files.begin(), files.end(), file) != files.end())
+        return false;
+    files.push_back(file);
+    return playlist_write(playlist, files);
+}
+
+bool library_playlist_remove(const std::string &playlist, const std::string &file)
+{
+    std::vector<std::string> files = playlist_read(playlist);
+    auto it = std::find(files.begin(), files.end(), file);
+    if (it == files.end())
+        return false;
+    files.erase(it);
+    return playlist_write(playlist, files);
+}
+
+bool library_playlist_move(const std::string &playlist, const std::string &file, int step)
+{
+    std::vector<std::string> files = playlist_read(playlist);
+    auto it = std::find(files.begin(), files.end(), file);
+    if (it == files.end())
+        return false;
+    /* to the next one the library has (a file on a drive that's out is
+     * skipped over, so a move always shows) */
+    long i = it - files.begin(), j = i;
+    do
+        j += step;
+    while (j >= 0 && j < (long)files.size() && !library_find(files[j]));
+    if (j < 0 || j >= (long)files.size())
+        return false;
+    std::string moved = files[i];
+    files.erase(files.begin() + i);
+    files.insert(files.begin() + j, moved);
+    return playlist_write(playlist, files);
+}
+
+std::string library_playlist_rename(const std::string &playlist, const std::string &name)
+{
+    std::string n = playlist_file_name(name);
+    if (n.empty())
+        return "";
+    std::string path = playlist_dir() + "/" + n + ".m3u8";
+    struct stat st;
+    if (path == playlist)
+        return path;
+    if (stat(path.c_str(), &st) == 0 || rename(playlist.c_str(), path.c_str()) != 0)
+        return "";
+    for (PlaylistFile &p : playlists)
+        if (p.path == playlist) {
+            p.path = path;
+            p.name = tidy_name(n + ".m3u8");
+        }
+    playlists_sort();
+    return path;
 }
 
 std::vector<int64_t> library_bookmarks(const std::string &path)

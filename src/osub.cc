@@ -722,11 +722,15 @@ void osub_sign_in()
         }
         std::string msg, bearer, host;
         if (a.user.empty()) {
-            /* no account: try the key alone with a small search (the
-             * informational calls answer any key) */
-            Reply r = https("GET", API_HOST, "/api/v1/subtitles?languages=en&query=vlc", api_headers(a, ""), "");
-            finish(r.error.empty() && r.status == 200 ? OSUB_DONE : OSUB_FAILED,
-                   r.error.empty() && r.status == 200 ? "The API key works" : server_error(r, "Checking the key"));
+            /* no account: try the key alone. Searches and the informational
+             * calls answer any key, even none; "discover" refuses a bad one
+             * (403, "You cannot consume this service"). */
+            Reply r = https("GET", API_HOST, "/api/v1/discover/popular?languages=en", api_headers(a, ""), "");
+            bool ok = r.error.empty() && r.status == 200;
+            finish(ok ? OSUB_DONE : OSUB_FAILED,
+                   ok ? "The API key works"
+                      : r.error.empty() && (r.status == 401 || r.status == 403) ? "OpenSubtitles refused this API key"
+                                                                               : server_error(r, "Checking the key"));
             return;
         }
         bool ok = sign_in(a, msg, bearer, host);

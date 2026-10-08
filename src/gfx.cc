@@ -469,13 +469,13 @@ bool gfx_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFla
 }
 
 bool gfx_image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage, VkImage *image,
-               VkDeviceMemory *memory, VkImageView *view)
+               VkDeviceMemory *memory, VkImageView *view, uint32_t mips)
 {
     VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ii.imageType = VK_IMAGE_TYPE_2D;
     ii.format = format;
     ii.extent = { w, h, 1 };
-    ii.mipLevels = 1;
+    ii.mipLevels = mips;
     ii.arrayLayers = 1;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -496,7 +496,7 @@ bool gfx_image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage,
     vi.image = *image;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = format;
-    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
     CHECK(vkCreateImageView(gfx.device, &vi, nullptr, view));
     return true;
 }
@@ -549,6 +549,6 @@ void gfx_barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImage
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1 };
     vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
