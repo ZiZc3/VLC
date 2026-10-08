@@ -180,8 +180,6 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Network links: HTTP, HTTPS, HLS, DASH, UDP, RTP, FTP | ✅ |
 | Free TV channels (iptv-org) | ✅ |
 | Internet radio (radio-browser) | ✅ |
-| TV guide (EPG) for channels | Not yet |
-| Podcast feeds | Not yet |
 
 ### 💿 Discs & files
 
