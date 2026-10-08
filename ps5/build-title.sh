@@ -204,5 +204,8 @@ fi
 sha=$(sha256sum "$app/eboot.bin" | cut -c1-12)
 mkdir -p "$repo/builds"
 cp "$work/llvm-pie.elf" "$repo/builds/llvm-pie-$sha.elf"
+# Only the newest three are kept (~140 MB each): enough to read a crash from
+# the build on the console and the two before it.
+ls -t "$repo"/builds/llvm-pie-*.elf | tail -n +4 | xargs -r rm -f --
 printf '==> %s: %s (eboot.bin %s bytes, %s; %s imports)\n' "$title_id" "$app" \
     "$(stat -c %s "$app/eboot.bin")" "$sha" "$(wc -l < "$app/imports.txt")"
