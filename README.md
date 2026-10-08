@@ -82,7 +82,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | `/mnt/usb0` … `/mnt/usb7`, `/mnt/ext0` | USB and extended storage |
 | `/data/homebrew/PPSA85300/vlc-ps5.log` | Log of the last session (attach it when reporting a problem) |
 
-## VLC Features
+## All VLC Features
 
 ✅ In the app.
 
