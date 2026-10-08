@@ -1,0 +1,137 @@
+# VLC-PS5's plugins, linked statically. One per line; '#' starts a comment.
+# gen-static-modules.sh turns this into the vlc_static_modules[] table and link line.
+
+# access and stream filters
+filesystem
+access_concat
+cache_read
+cache_block
+prefetch
+inflate
+skiptags
+
+# network (Batch 6): http/https (TLS: gnutls), SMB shares (smb2), DLNA (upnp),
+# logins kept for the session (memory_keystore), folder listings (directory_demux), HLS/DASH,
+# playlists over the network (IPTV .m3u), UDP/RTP multicast, FTP; an XML reader (libxml2)
+# for DASH, podcast feeds and .xspf
+http
+https
+gnutls
+smb2
+upnp
+memory_keystore
+directory_demux
+xml
+adaptive
+playlist
+udp
+rtp
+ftp
+
+# demux (anything else falls back to avformat)
+mkv
+mp4
+avi
+asf
+es
+ps
+ts
+h26x
+mpgv
+vc1
+wav
+flacsys
+subtitle
+vobsub
+avformat
+idummy
+
+# decoders
+avcodec
+dav1d
+araw
+lpcm
+adpcm
+rawvideo
+subsdec
+substx3g
+subsusf
+webvtt
+ttml
+cc
+spudec
+dvbsub
+cvdsub
+svcdsub
+
+# packetizers
+packetizer_a52
+packetizer_av1
+packetizer_avparser
+packetizer_copy
+packetizer_dirac
+packetizer_dts
+packetizer_flac
+packetizer_h264
+packetizer_hevc
+packetizer_mlp
+packetizer_mpeg4audio
+packetizer_mpeg4video
+packetizer_mpegaudio
+packetizer_mpegvideo
+packetizer_vc1
+
+# video: conversion, scaling, deinterlacing, subtitle blending, text
+swscale
+chain
+yuvp
+blend
+scale
+canvas
+croppadd
+transform
+deinterlace
+i420_rgb
+i420_rgb_sse2
+i420_yuy2
+i420_yuy2_sse2
+i422_i420
+i422_yuy2
+i422_yuy2_sse2
+yuy2_i420
+yuy2_i422
+grey_yuv
+i420_10_p010
+i420_nv12
+freetype
+# styled ASS / SSA subtitles (karaoke, positions, the file's own fonts)
+libass
+# discs (DVD menus, Blu-ray without BD-J) as ISO files or folders; ZIP / RAR / 7z
+dvdnav
+dvdread
+libbluray
+archive
+# libvlc's player API creates these filters' options (logo, marquee, picture adjust)
+adjust
+logo
+marq
+
+# audio: formats, resampling, channels, volume, speed
+audio_format
+ugly_resampler
+scaletempo
+trivial_channel_mixer
+simple_channel_mixer
+dolby_surround_decoder
+remap
+float_mixer
+integer_mixer
+equalizer
+
+# outputs (the app draws and plays through libvlc callbacks)
+vmem
+amem
+vdummy
+adummy
+# no console_logger: its putc_unlocked macro reads FILE internals the console's libc lays out
+# differently (crash in libvlc_new); the app logs through libvlc_log_set instead
