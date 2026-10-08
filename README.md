@@ -23,6 +23,7 @@
 
 - Plays nearly anything VLC plays: H.264, HEVC (8 and 10-bit), AV1, VP9, VC-1, MPEG-2 and more, up to 4K, with every common audio format, including TrueHD and DTS-HD.
 - **Library** with Home, Videos, Music and Browse: thumbnails, Continue watching, Favourites and search.
+- **Playlists**: make your own, add any video or song from anywhere with Options, reorder them; covers made from their videos; `.m3u` files on your drives play too.
 - **Subtitles** in every script, styled ASS/SSA, size and colour, delay, plus **OpenSubtitles** downloads.
 - **5.1 / 7.1 surround**, equalizer, night mode and audio delay.
 - **Network**: SMB shares, DLNA servers, network links (HTTP, HLS, DASH…), free TV channels and internet radio.
@@ -140,6 +141,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Resume and Continue watching | ✅ |
 | Seek preview while scrubbing | ✅ |
 | Speed 0.25× – 4× | ✅ |
+| Playlists | ✅ |
 | Chapters (list, skip, marks on the seek bar) | ✅ |
 | Bookmarks inside a file | ✅ |
 | A–B repeat | ✅ |
