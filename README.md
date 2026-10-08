@@ -174,7 +174,6 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Feature | Status |
 |---|---|
 | PC/Phone page: send files over Wi-Fi | ✅ |
-| remote | ✅ |
 | SMB shares (Windows, NAS) with login | ✅ |
 | DLNA / UPnP media servers | ✅ |
 | Network links: HTTP, HTTPS, HLS, DASH, UDP, RTP, FTP | ✅ |
