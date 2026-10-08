@@ -2,7 +2,7 @@
   <img src="assets/vlc-logo.png" alt="VLC" width="140">
 </p>
 
-<h1 align="center">VLC for PS5</h1>
+<h1 align="center">VLC</h1>
 
 <p align="center">
   <b>VLC media player, running natively on PlayStation 5.</b><br>
