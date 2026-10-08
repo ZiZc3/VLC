@@ -40,7 +40,7 @@ Download the [latest release](../../releases/latest), then:
 2. Start **VLC** from the home screen.
 3. Add your media: a USB drive, `/data/vlc/`, or send files from your phone (Options › Send files from a phone).
 
-Optional full access. With etaHEN, the Lapy JB daemon or the Helper, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
+Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
 
 ## Controls
 
@@ -81,7 +81,7 @@ Optional full access. With etaHEN, the Lapy JB daemon or the Helper, VLC can lif
 | `/mnt/usb0` … `/mnt/usb7`, `/mnt/ext0` | USB and extended storage |
 | `/data/homebrew/PPSA85300/vlc-ps5.log` | Log of the last session (attach it when reporting a problem) |
 
-## Roadmap
+## Roadmap - VLC Features
 
 ✅ In the app · 🗓️ Planned
 
@@ -101,10 +101,9 @@ Optional full access. With etaHEN, the Lapy JB daemon or the Helper, VLC can lif
 | 360° videos (look around with the right stick) | ✅ |
 | Frame-by-frame step | ✅ |
 | Screenshots to PNG | ✅ |
-| Hardware decoding (H.264 / HEVC / VP9 up to 4K) | 🗓️ |
-| HDR → SDR tone mapping | 🗓️ |
-| HDR10 output to the TV | 🗓️ |
-| Upscaling for sub-4K video | 🗓️ |
+| Hardware decoding (H.264 / HEVC / VP9 up to 4K) | Planned |
+| HDR → SDR tone mapping | Planned |
+| HDR10 output to the TV | Planned |
 
 ### 🔊 Audio
 
@@ -149,7 +148,6 @@ Optional full access. With etaHEN, the Lapy JB daemon or the Helper, VLC can lif
 | Up next with countdown, Watch again | ✅ |
 | Sleep timer | ✅ |
 | Touchpad swipes (seek, volume) | ✅ |
-| On-screen performance overlay | 🗓️ |
 
 ### 📚 Library & interface
 
@@ -170,7 +168,6 @@ Optional full access. With etaHEN, the Lapy JB daemon or the Helper, VLC can lif
 | Audio visualizer | ✅ |
 | Photo viewer with slideshow | ✅ |
 | Text / .nfo viewer | ✅ |
-| Phone page in every language | 🗓️ |
 
 ### 🌐 Network
 
