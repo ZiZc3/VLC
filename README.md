@@ -26,7 +26,7 @@
 - **Subtitles** in every script, styled ASS/SSA, size and colour, delay, plus **OpenSubtitles** downloads.
 - **5.1 / 7.1 surround**, equalizer, night mode and audio delay.
 - **Network**: SMB shares, DLNA servers, network links (HTTP, HLS, DASH…), free TV channels and internet radio.
-- **PC/Phone page**: open `http://<ps5-ip>:8080` to send files to the PS5 or use your phone as a remote.
+- **PC/Phone page**: open `http://<ps5-ip>:8080` to send files to the PS5, use your pc or phone as a remote.
 - Music mode with covers and a visualizer, a photo viewer, DVD / Blu-ray folders, and ZIP / RAR / 7z archives.
 - Two looks (**Classic** and **Modern**) and **16 languages**.
 
@@ -38,7 +38,7 @@ Download the [latest release](../../releases/latest), then:
 
 1. Copy the **`PPSA85300`** folder to `/data/homebrew/`.
 2. Start **VLC** from the home screen.
-3. Add your media: a USB drive, `/data/vlc/`, or send files from your phone (Options › Send files from a phone).
+3. Add your media: a USB drive, `/data/vlc/`, or send files from your pc/phone (Options › Send files from a phone).
 
 Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
 
@@ -173,8 +173,8 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 
 | Feature | Status |
 |---|---|
-| Phone page: send files over Wi-Fi | ✅ |
-| Phone remote | ✅ |
+| PC/Phone page: send files over Wi-Fi | ✅ |
+| remote | ✅ |
 | SMB shares (Windows, NAS) with login | ✅ |
 | DLNA / UPnP media servers | ✅ |
 | Network links: HTTP, HTTPS, HLS, DASH, UDP, RTP, FTP | ✅ |
