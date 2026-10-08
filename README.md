@@ -220,4 +220,3 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 
 VLC for PS5 is licensed under the **GNU General Public License v3.0** (see [`LICENSE`](LICENSE)).
 VLC itself is GPL-2.0-or-later / LGPL-2.1-or-later. The bundled libraries and fonts keep their own licenses.
-No media is included. VLC for PS5 is a fan project, not affiliated with Sony or VideoLAN. VLC and the cone logo are trademarks of VideoLAN.
