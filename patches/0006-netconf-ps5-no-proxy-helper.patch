@@ -1,0 +1,24 @@
+diff -ru a/src/posix/netconf.c b/src/posix/netconf.c
+--- a/src/posix/netconf.c	2026-10-08 00:24:12.063623621 +0000
++++ b/src/posix/netconf.c	2026-10-08 00:24:12.070351433 +0000
+@@ -45,6 +45,14 @@
+  */
+ char *vlc_getProxyUrl(const char *url)
+ {
++#if defined(__PROSPERO__)
++    /* VLC-PS5: a title can't start programs (posix_spawnp crashed the app on
++     * every http:// and https:// request). No libproxy helper: the
++     * environment's http_proxy, if any. */
++    (void) url;
++    char *env = getenv("http_proxy");
++    return env != NULL ? strdup(env) : NULL;
++#else
+     /* libproxy helper */
+     pid_t pid;
+     posix_spawn_file_actions_t actions;
+@@ -120,4 +128,5 @@
+     if (var != NULL)
+         var = strdup(var);
+     return var;
++#endif
+ }

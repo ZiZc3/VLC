@@ -1,0 +1,152 @@
+diff -ru a/modules/text_renderer/freetype/freetype.c b/modules/text_renderer/freetype/freetype.c
+--- a/modules/text_renderer/freetype/freetype.c	2026-10-07 20:14:22.677486381 +0000
++++ b/modules/text_renderer/freetype/freetype.c	2026-10-07 20:14:22.679970781 +0000
+@@ -1367,6 +1367,121 @@
+     FT_Done_Face( ( FT_Face ) p_face );
+ }
+ 
++#if !defined( HAVE_FONTCONFIG ) && !defined( __APPLE__ ) && !defined( _WIN32 ) && !defined( __ANDROID__ )
++/*
++ * VLC-PS5: no system font service. A family is a font file (freetype-font is a
++ * path), and the fallbacks for characters the subtitle font doesn't have are
++ * every font in the "fallback" folder next to it (Noto Arabic, Hebrew, CJK,
++ * ...), in name order. Family names are lowercased by NewFamily; the fonts
++ * keep the real (case-sensitive) paths.
++ */
++#include <dirent.h>
++#include <sys/stat.h>
++
++#define PS5_FALLBACK_KEY "vlc-ps5-fallbacks"
++
++static const vlc_family_t *Ps5_GetFamily( filter_t *p_filter, const char *psz_family )
++{
++    filter_sys_t *p_sys = p_filter->p_sys;
++    char *psz_lc = ToLower( psz_family );
++    if( unlikely( !psz_lc ) )
++        return NULL;
++    vlc_family_t *p_family = vlc_dictionary_value_for_key( &p_sys->family_map, psz_lc );
++    free( psz_lc );
++    if( p_family != kVLCDictionaryNotFound )
++        return p_family;
++
++    struct stat st;
++    if( stat( psz_family, &st ) != 0 || !S_ISREG( st.st_mode ) )
++        return NULL;
++    p_family = NewFamily( p_filter, psz_family, &p_sys->p_families,
++                          &p_sys->family_map, psz_family );
++    if( unlikely( !p_family ) )
++        return NULL;
++    /* One file for every style: FreeType makes the bold and the slant. */
++    char *psz_file = strdup( psz_family );
++    if( psz_file )
++        NewFont( psz_file, 0, false, false, p_family );
++    return p_family;
++}
++
++static int Ps5_CompareNames( const void *a, const void *b )
++{
++    return strcmp( *(char * const *)a, *(char * const *)b );
++}
++
++static vlc_family_t *Ps5_GetFallbacks( filter_t *p_filter, const char *psz_family,
++                                       uni_char_t codepoint )
++{
++    VLC_UNUSED( psz_family );
++    VLC_UNUSED( codepoint );
++    filter_sys_t *p_sys = p_filter->p_sys;
++    vlc_family_t *p_list = vlc_dictionary_value_for_key( &p_sys->fallback_map, PS5_FALLBACK_KEY );
++    if( p_list != kVLCDictionaryNotFound )
++        return p_list;
++
++    /* <folder of the default font>/fallback */
++    char *psz_dir = NULL;
++    const char *psz_default = p_sys->p_default_style->psz_fontname;
++    const char *psz_slash = psz_default ? strrchr( psz_default, '/' ) : NULL;
++    if( psz_slash &&
++        asprintf( &psz_dir, "%.*s/fallback", (int)( psz_slash - psz_default ), psz_default ) < 0 )
++        psz_dir = NULL;
++
++    char **ppsz_names = NULL;
++    size_t i_names = 0;
++    DIR *p_dir = psz_dir ? opendir( psz_dir ) : NULL;
++    if( p_dir )
++    {
++        struct dirent *p_ent;
++        while( ( p_ent = readdir( p_dir ) ) )
++        {
++            const char *psz_dot = strrchr( p_ent->d_name, '.' );
++            if( !psz_dot || ( strcasecmp( psz_dot, ".ttf" ) && strcasecmp( psz_dot, ".otf" ) &&
++                              strcasecmp( psz_dot, ".ttc" ) ) )
++                continue;
++            char **pp = realloc( ppsz_names, ( i_names + 1 ) * sizeof( *pp ) );
++            if( !pp )
++                break;
++            ppsz_names = pp;
++            if( asprintf( &ppsz_names[i_names], "%s/%s", psz_dir, p_ent->d_name ) >= 0 )
++                i_names++;
++        }
++        closedir( p_dir );
++    }
++    if( i_names )
++        qsort( ppsz_names, i_names, sizeof( *ppsz_names ), Ps5_CompareNames );
++
++    for( size_t i = 0; i < i_names; i++ )
++    {
++        vlc_family_t *p_family = NewFamily( p_filter, ppsz_names[i], NULL,
++                                            &p_sys->fallback_map, PS5_FALLBACK_KEY );
++        if( p_family )
++            NewFont( ppsz_names[i], 0, false, false, p_family ); /* takes the path */
++        else
++            free( ppsz_names[i] );
++    }
++    free( ppsz_names );
++    msg_Dbg( p_filter, "%zu fallback fonts in %s", i_names, psz_dir ? psz_dir : "(none)" );
++    free( psz_dir );
++
++    p_list = vlc_dictionary_value_for_key( &p_sys->fallback_map, PS5_FALLBACK_KEY );
++    if( p_list == kVLCDictionaryNotFound && psz_default )
++    {
++        /* None: the default font alone, so the folder isn't read again. */
++        vlc_family_t *p_family = NewFamily( p_filter, psz_default, NULL,
++                                            &p_sys->fallback_map, PS5_FALLBACK_KEY );
++        char *psz_file = strdup( psz_default );
++        if( p_family && psz_file )
++            NewFont( psz_file, 0, false, false, p_family );
++        else
++            free( psz_file );
++        p_list = vlc_dictionary_value_for_key( &p_sys->fallback_map, PS5_FALLBACK_KEY );
++    }
++    return p_list == kVLCDictionaryNotFound ? NULL : p_list;
++}
++#endif
++
+ /*****************************************************************************
+  * Create: allocates osd-text video thread output method
+  *****************************************************************************
+@@ -1474,7 +1589,10 @@
+     if( Android_Prepare( p_filter ) == VLC_ENOMEM )
+         goto error;
+ #else
+-    p_sys->pf_select = Dummy_Select;
++    /* VLC-PS5: font files and a fallback folder (Ps5_GetFamily). */
++    p_sys->pf_get_family = Ps5_GetFamily;
++    p_sys->pf_get_fallbacks = Ps5_GetFallbacks;
++    p_sys->pf_select = Generic_Select;
+ #endif
+ 
+     p_sys->p_face = SelectAndLoadFace( p_filter, p_sys->p_default_style, 0 );
+diff -ru a/modules/text_renderer/freetype/text_layout.c b/modules/text_renderer/freetype/text_layout.c
+--- a/modules/text_renderer/freetype/text_layout.c	2026-10-07 20:14:22.679306781 +0000
++++ b/modules/text_renderer/freetype/text_layout.c	2026-10-07 20:14:22.680002581 +0000
+@@ -89,6 +89,11 @@
+ # define HAVE_FONT_FALLBACK
+ #endif
+ 
++/* VLC-PS5: font files and a fallback folder (freetype.c, Ps5_GetFallbacks). */
++#if !defined( HAVE_FONTCONFIG ) && !defined( __APPLE__ ) && !defined( _WIN32 ) && !defined( __ANDROID__ )
++# define HAVE_FONT_FALLBACK
++#endif
++
+ #ifndef HAVE_FONT_FALLBACK
+ # warning YOU ARE MISSING FONTS FALLBACK. TEXT WILL BE INCORRECT
+ #endif

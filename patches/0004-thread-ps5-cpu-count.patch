@@ -1,0 +1,16 @@
+--- a/src/posix/thread.c
++++ b/src/posix/thread.c
+@@ -683,7 +683,12 @@
+ 
+ unsigned vlc_GetCPUCount(void)
+ {
+-#if defined(HAVE_SCHED_GETAFFINITY)
++#if defined(__PROSPERO__)
++    /* PS5: no sched_getaffinity, and sysconf() doesn't give the core count, so
++     * decoders ran on one thread (1080p60 VP9 fell behind). The console's CPU
++     * has 8 cores for an app. */
++    return 8;
++#elif defined(HAVE_SCHED_GETAFFINITY)
+     cpu_set_t cpu;
+ 
+     CPU_ZERO(&cpu);

@@ -1,0 +1,30 @@
+--- a/src/posix/error.c
++++ b/src/posix/error.c
+@@ -29,6 +29,19 @@
+ 
+ #include <vlc_common.h>
+ 
++#ifdef __PROSPERO__
++/* PS5: FreeBSD 11's libc has neither strerror_l nor message locales.
++ * strerror_r into a per-thread buffer keeps the "valid until the next call
++ * in the same thread" promise below. */
++static const char *vlc_strerror_l(int errnum, const char *lname)
++{
++    static __thread char buf[128];
++    (void) lname;
++    if (strerror_r(errnum, buf, sizeof (buf)) != 0)
++        return "Error message unavailable";
++    return buf;
++}
++#else
+ static const char *vlc_strerror_l(int errnum, const char *lname)
+ {
+     int saved_errno = errno;
+@@ -53,6 +66,7 @@
+     freelocale(loc);
+     return buf;
+ }
++#endif
+ 
+ /**
+  * Formats an error message in the current locale.

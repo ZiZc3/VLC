@@ -1,0 +1,15 @@
+--- a/modules/text_renderer/freetype/platform_fonts.h	2026-10-06 01:05:31.995097613 +0000
++++ b/modules/text_renderer/freetype/platform_fonts.h	2026-10-06 01:05:32.002121242 +0000
+@@ -67,6 +67,12 @@
+ # define SYSTEM_DEFAULT_FAMILY "Times New Roman WT K"
+ # define SYSTEM_DEFAULT_MONOSPACE_FONT_FILE "/psfonts/mtsansdk.ttf"
+ # define SYSTEM_DEFAULT_MONOSPACE_FAMILY "Monotype Sans Duospace WT K"
++#elif defined( __PROSPERO__ )
++/* PS5: no fontconfig and no system fonts we may read; the app ships its own. */
++# define SYSTEM_DEFAULT_FONT_FILE "/app0/fonts/subtitle.ttf"
++# define SYSTEM_DEFAULT_FAMILY "Subtitle"
++# define SYSTEM_DEFAULT_MONOSPACE_FONT_FILE "/app0/fonts/mono.ttf"
++# define SYSTEM_DEFAULT_MONOSPACE_FAMILY "Monospace"
+ #elif defined( __ANDROID__ )
+ # define SYSTEM_DEFAULT_FONT_FILE "/system/fonts/Roboto-Regular.ttf"
+ # define SYSTEM_DEFAULT_FAMILY "sans-serif"

@@ -1,0 +1,62 @@
+--- a/src/misc/interrupt.c
++++ b/src/misc/interrupt.c
+@@ -369,11 +369,59 @@
+     return ret;
+ }
+ 
++#if defined(__PROSPERO__) || defined(VLC_PS5_SLICED_POLL)
++/* PS5: a title can't make the pipe (or eventfd) the wake-up below needs, so
++ * every interruptible wait failed with ENOMEM (no file could be read). Wait in
++ * short slices instead and look at the interrupt flag between them: files are
++ * always ready (no cost), and stop/seek still interrupt within a slice. */
++static void vlc_poll_i11e_nowake(void *data)
++{
++    (void) data;
++}
++
++static int vlc_poll_i11e_sliced(struct pollfd *fds, unsigned nfds, int timeout,
++                                vlc_interrupt_t *ctx)
++{
++    int ret;
++
++    vlc_interrupt_prepare(ctx, vlc_poll_i11e_nowake, NULL);
++    for (;;)
++    {
++        int slice = (timeout < 0 || timeout > 20) ? 20 : timeout;
++
++        ret = poll(fds, nfds, slice);
++        if (ret != 0)
++            break;
++
++        vlc_mutex_lock(&ctx->lock);
++        bool stop = ctx->interrupted;
++        vlc_mutex_unlock(&ctx->lock);
++        if (stop)
++            break;
++        if (timeout >= 0)
++        {
++            timeout -= slice;
++            if (timeout <= 0)
++                break;
++        }
++    }
++    if (vlc_interrupt_finish(ctx))
++    {
++        errno = EINTR;
++        ret = -1;
++    }
++    return ret;
++}
++#endif
++
+ int vlc_poll_i11e(struct pollfd *fds, unsigned nfds, int timeout)
+ {
+     vlc_interrupt_t *ctx = vlc_interrupt_var;
+     if (ctx == NULL)
+         return poll(fds, nfds, timeout);
++#if defined(__PROSPERO__) || defined(VLC_PS5_SLICED_POLL)
++    return vlc_poll_i11e_sliced(fds, nfds, timeout, ctx);
++#endif
+ 
+     int ret;
+ 

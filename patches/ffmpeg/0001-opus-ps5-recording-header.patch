@@ -1,0 +1,24 @@
+--- a/libavcodec/opus/parse.c
++++ b/libavcodec/opus/parse.c
+@@ -316,8 +316,19 @@
+ 
+     version = extradata[8];
+     if (version > 15) {
+-        avpriv_request_sample(avctx, "Extradata version %d", version);
+-        return AVERROR_PATCHWELCOME;
++        /* VLC-PS5: the PS5's own recordings (WebM) carry an Opus header with a
++         * version byte past the spec. For mono or stereo, decode as if there
++         * were no header at all (the defaults above) instead of refusing. */
++        if (extradata != opus_default_extradata && channels <= 2) {
++            av_log(avctx, AV_LOG_WARNING,
++                   "Extradata version %d unknown, using the default stereo header\n", version);
++            extradata      = opus_default_extradata;
++            extradata_size = sizeof(opus_default_extradata);
++            version        = extradata[8];
++        } else {
++            avpriv_request_sample(avctx, "Extradata version %d", version);
++            return AVERROR_PATCHWELCOME;
++        }
+     }
+ 
+     avctx->delay = AV_RL16(extradata + 10);

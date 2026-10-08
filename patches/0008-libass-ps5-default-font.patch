@@ -1,0 +1,26 @@
+diff -ru a/modules/codec/libass.c b/modules/codec/libass.c
+--- a/modules/codec/libass.c	2026-10-08 02:22:36.569188645 +0000
++++ b/modules/codec/libass.c	2026-10-08 02:22:36.576007246 +0000
+@@ -246,6 +246,12 @@
+         psz_family = psz_family_droid;
+     }
+ 
++#elif !defined( HAVE_FONTCONFIG ) && !defined( __APPLE__ ) && !defined( _WIN32 )
++    /* VLC-PS5 (and its Linux test build): no font service: the subtitle font
++     * VLC's freetype module uses (freetype-font). */
++    char *psz_font_ps5 = var_InheritString( p_dec, "freetype-font" );
++    const char *psz_font = psz_font_ps5;
++    const char *psz_family = "Arial";
+ #elif defined( __APPLE__ )
+     const char *psz_font = NULL; /* We don't ship a default font with VLC */
+     const char *psz_family = "Helvetica Neue"; /* Use HN if we can't find anything more suitable - Arial is not on all Apple platforms */
+@@ -270,6 +276,9 @@
+ #else
+     ass_set_fonts( p_renderer, psz_font, psz_family, ASS_FONTPROVIDER_AUTODETECT, NULL, 0 );
+ #endif
++#if !defined( HAVE_FONTCONFIG ) && !defined( __APPLE__ ) && !defined( _WIN32 )
++    free( psz_font_ps5 );
++#endif
+ 
+     /* Anything else than NONE will break smooth img updating.
+        TODO: List and force ASS_HINTING_LIGHT for known problematic fonts */

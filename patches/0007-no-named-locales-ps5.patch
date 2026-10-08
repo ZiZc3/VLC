@@ -1,0 +1,213 @@
+diff -ru a/modules/demux/adaptive/ID.cpp b/modules/demux/adaptive/ID.cpp
+--- a/modules/demux/adaptive/ID.cpp	2026-10-08 01:12:04.068460646 +0000
++++ b/modules/demux/adaptive/ID.cpp	2026-10-08 01:12:04.102511310 +0000
+@@ -34,7 +34,7 @@
+ ID::ID(uint64_t id_)
+ {
+     std::stringstream ss;
+-    ss.imbue(std::locale("C"));
++    ss.imbue(std::locale::classic());
+     ss << "default_id#" << id_;
+     id = ss.str();
+ }
+diff -ru a/modules/demux/adaptive/SegmentTracker.cpp b/modules/demux/adaptive/SegmentTracker.cpp
+--- a/modules/demux/adaptive/SegmentTracker.cpp	2026-10-08 01:12:04.053990361 +0000
++++ b/modules/demux/adaptive/SegmentTracker.cpp	2026-10-08 01:12:04.100303113 +0000
+@@ -174,7 +174,7 @@
+ std::string SegmentTracker::Position::toString() const
+ {
+     std::stringstream ss;
+-    ss.imbue(std::locale("C"));
++    ss.imbue(std::locale::classic());
+     if(isValid())
+         ss << "seg# " << number
+            << " " << init_sent
+diff -ru a/modules/demux/adaptive/http/ConnectionParams.cpp b/modules/demux/adaptive/http/ConnectionParams.cpp
+--- a/modules/demux/adaptive/http/ConnectionParams.cpp	2026-10-08 01:12:04.049137366 +0000
++++ b/modules/demux/adaptive/http/ConnectionParams.cpp	2026-10-08 01:12:04.099597213 +0000
+@@ -65,7 +65,7 @@
+     path = path_;
+ 
+     std::ostringstream os;
+-    os.imbue(std::locale("C"));
++    os.imbue(std::locale::classic());
+     os << scheme << "://";
+     if(!hostname.empty())
+     {
+diff -ru a/modules/demux/adaptive/playlist/Segment.cpp b/modules/demux/adaptive/playlist/Segment.cpp
+--- a/modules/demux/adaptive/playlist/Segment.cpp	2026-10-08 01:12:04.078214836 +0000
++++ b/modules/demux/adaptive/playlist/Segment.cpp	2026-10-08 01:12:04.104165408 +0000
+@@ -158,7 +158,7 @@
+ void ISegment::debug(vlc_object_t *obj, int indent) const
+ {
+     std::stringstream ss;
+-    ss.imbue(std::locale("C"));
++    ss.imbue(std::locale::classic());
+     ss << std::string(indent, ' ') << debugName << " #" << getSequenceNumber();
+     ss << " url=" << getUrlSegment().toString();
+     if(startByte!=endByte)
+diff -ru a/modules/demux/adaptive/playlist/SegmentTimeline.cpp b/modules/demux/adaptive/playlist/SegmentTimeline.cpp
+--- a/modules/demux/adaptive/playlist/SegmentTimeline.cpp	2026-10-08 01:12:04.073405241 +0000
++++ b/modules/demux/adaptive/playlist/SegmentTimeline.cpp	2026-10-08 01:12:04.103218209 +0000
+@@ -290,7 +290,7 @@
+ void SegmentTimeline::Element::debug(vlc_object_t *obj, int indent) const
+ {
+     std::stringstream ss;
+-    ss.imbue(std::locale("C"));
++    ss.imbue(std::locale::classic());
+     ss << std::string(indent + 1, ' ') << "Element #" << number
+        << " d=" << d << " r=" << r << " @t=" << t;
+     msg_Dbg(obj, "%s", ss.str().c_str());
+diff -ru a/modules/demux/adaptive/tools/Conversions.cpp b/modules/demux/adaptive/tools/Conversions.cpp
+--- a/modules/demux/adaptive/tools/Conversions.cpp	2026-10-08 01:12:04.063556451 +0000
++++ b/modules/demux/adaptive/tools/Conversions.cpp	2026-10-08 01:12:04.101793411 +0000
+@@ -102,7 +102,7 @@
+            UTCTIME_SEC, UTCTIME_FRAC_NUM, UTCTIME_FRAC_DEN, UTCTIME_TZ };
+     int values[9] = {0};
+     std::istringstream in(str);
+-    in.imbue(std::locale("C"));
++    in.imbue(std::locale::classic());
+ 
+     try
+     {
+diff -ru a/modules/demux/adaptive/tools/Conversions.hpp b/modules/demux/adaptive/tools/Conversions.hpp
+--- a/modules/demux/adaptive/tools/Conversions.hpp	2026-10-08 01:12:04.058734956 +0000
++++ b/modules/demux/adaptive/tools/Conversions.hpp	2026-10-08 01:12:04.101068712 +0000
+@@ -50,7 +50,7 @@
+         Integer(const std::string &str)
+         {
+             std::istringstream in(str);
+-            in.imbue(std::locale("C"));
++            in.imbue(std::locale::classic());
+             if(!(in >> value))
+                 value = 0;
+         }
+diff -ru a/modules/demux/dash/mpd/TemplatedUri.cpp b/modules/demux/dash/mpd/TemplatedUri.cpp
+--- a/modules/demux/dash/mpd/TemplatedUri.cpp	2026-10-08 01:12:04.087962625 +0000
++++ b/modules/demux/dash/mpd/TemplatedUri.cpp	2026-10-08 01:12:04.105746707 +0000
+@@ -52,7 +52,7 @@
+         if(fmtend != std::string::npos)
+         {
+             std::istringstream iss(str.substr(pos + 1, fmtend - pos));
+-            iss.imbue(std::locale("C"));
++            iss.imbue(std::locale::classic());
+             formatwidth = 1; /* %d -> default width = 1 */
+             if(iss.good())
+             {
+@@ -132,7 +132,7 @@
+ static std::string FormatValue(uint64_t value, int width)
+ {
+     std::stringstream oss;
+-    oss.imbue(std::locale("C"));
++    oss.imbue(std::locale::classic());
+     if(width > 0)
+     {
+         oss.width(width); /* set format string length */
+diff -ru a/modules/demux/hls/playlist/Tags.cpp b/modules/demux/hls/playlist/Tags.cpp
+--- a/modules/demux/hls/playlist/Tags.cpp	2026-10-08 01:12:04.082979431 +0000
++++ b/modules/demux/hls/playlist/Tags.cpp	2026-10-08 01:12:04.104959708 +0000
+@@ -41,7 +41,7 @@
+ uint64_t Attribute::decimal() const
+ {
+     std::istringstream is(value);
+-    is.imbue(std::locale("C"));
++    is.imbue(std::locale::classic());
+     uint64_t ret;
+     return (is >> ret) ? ret : 0;
+ }
+@@ -49,7 +49,7 @@
+ double Attribute::floatingPoint() const
+ {
+     std::istringstream is(value);
+-    is.imbue(std::locale("C"));
++    is.imbue(std::locale::classic());
+     double ret;
+     return (is >> ret) ? ret : 0;
+ }
+@@ -63,7 +63,7 @@
+         {
+             unsigned val;
+             std::stringstream ss(value.substr(i, 2));
+-            ss.imbue(std::locale("C"));
++            ss.imbue(std::locale::classic());
+             if((ss >> std::hex) >> val)
+                 ret.push_back(val);
+         }
+@@ -84,7 +84,7 @@
+     std::size_t length;
+     adaptive::optional<std::size_t> offset;
+     std::istringstream is(value);
+-    is.imbue(std::locale("C"));
++    is.imbue(std::locale::classic());
+ 
+     if(!is.good() || !(is >> length))
+         return ByteRange();
+@@ -107,7 +107,7 @@
+     int w = 0, h = 0;
+ 
+     std::istringstream is(value);
+-    is.imbue(std::locale("C"));
++    is.imbue(std::locale::classic());
+     if(is.good())
+     {
+         is >> w;
+diff -ru a/modules/demux/smooth/playlist/QualityLevel.cpp b/modules/demux/smooth/playlist/QualityLevel.cpp
+--- a/modules/demux/smooth/playlist/QualityLevel.cpp	2026-10-08 01:12:04.093101520 +0000
++++ b/modules/demux/smooth/playlist/QualityLevel.cpp	2026-10-08 01:12:04.106482106 +0000
+@@ -68,7 +68,7 @@
+         if(pos != std::string::npos)
+         {
+             std::stringstream ss;
+-            ss.imbue(std::locale("C"));
++            ss.imbue(std::locale::classic());
+             const SegmentTimeline *tl = templ->inheritSegmentTimeline();
+             if(tl)
+             {
+@@ -84,7 +84,7 @@
+     if(pos != std::string::npos)
+     {
+         std::stringstream ss;
+-        ss.imbue(std::locale("C"));
++        ss.imbue(std::locale::classic());
+         ss << getBandwidth();
+         ret.replace(pos, std::string("{bitrate}").length(), ss.str());
+     }
+diff -ru a/src/text/charset.c b/src/text/charset.c
+--- a/src/text/charset.c	2026-10-08 01:12:04.097827415 +0000
++++ b/src/text/charset.c	2026-10-08 01:12:04.113041599 +0000
+@@ -49,6 +49,11 @@
+  */
+ double us_strtod( const char *str, char **end )
+ {
++#if defined(__PROSPERO__)
++    /* VLC-PS5: newlocale() crashes on the console, and the app never leaves
++     * the "C" locale: plain strtod is already locale-independent here. */
++    return strtod (str, end);
++#endif
+     locale_t loc = newlocale (LC_NUMERIC_MASK, "C", NULL);
+     locale_t oldloc = uselocale (loc);
+     double res = strtod (str, end);
+@@ -68,6 +73,11 @@
+  */
+ float us_strtof( const char *str, char **end )
+ {
++#if defined(__PROSPERO__)
++    /* VLC-PS5: newlocale() crashes on the console, and the app never leaves
++     * the "C" locale: plain strtof is already locale-independent here. */
++    return strtof (str, end);
++#endif
+     locale_t loc = newlocale (LC_NUMERIC_MASK, "C", NULL);
+     locale_t oldloc = uselocale (loc);
+     float res = strtof (str, end);
+@@ -97,6 +107,11 @@
+  */
+ int us_vasprintf( char **ret, const char *format, va_list ap )
+ {
++#if defined(__PROSPERO__)
++    /* VLC-PS5: newlocale() crashes on the console, and the app never leaves
++     * the "C" locale: plain vasprintf is already locale-independent here. */
++    return vasprintf( ret, format, ap );
++#endif
+     locale_t loc = newlocale( LC_NUMERIC_MASK, "C", NULL );
+     locale_t oldloc = uselocale( loc );
+ 
