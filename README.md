@@ -188,6 +188,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 |---|---|
 | DVD folders and ISOs with menus | ✅ |
 | Blu-ray folders and ISOs (unprotected) | ✅ |
+| Blu-ray Java (BD-J) menus | ❌ needs Java, which the PS5 hasn't got: those discs play without menus |
 | ZIP, RAR and 7z archives open like folders | ✅ |
 
 ## Building
