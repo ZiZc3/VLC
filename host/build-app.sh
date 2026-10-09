@@ -48,7 +48,7 @@ done
 compile "$repo/third_party/imgui/backends/imgui_impl_vulkan.cpp" g++ -std=c++17
 compile "$repo/third_party/volk/volk.c" gcc -std=c11
 compile "$repo/src/platform_host.c" gcc -std=gnu11
-for f in gfx image prefs player library network osub lang web ui main; do
+for f in gfx image prefs player subconv library network osub lang web ui main; do
     compile "$repo/src/$f.cc" g++ -std=c++17 -Wno-missing-field-initializers
 done
 gcc -O2 -c "$static/static_modules.c" -o "$obj/static_modules.o"
@@ -67,5 +67,5 @@ if [[ ${VLCPS5_OWN_IO:-0} == 1 ]]; then
     objs+=("$obj/libc_missing.o")
     io_flags=(-Wl,--defsym=readv=xemu_ps5_readv -Wl,--defsym=writev=xemu_ps5_writev)
 fi
-g++ "${san[@]}" -o "$out/$name" "${objs[@]}" @"$static/link.rsp" -lpthread -ldl "${io_flags[@]}"
+g++ "${san[@]}" -o "$out/$name" "${objs[@]}" @"$static/link.rsp" "$prefix/lib/libiconv.a" -lpthread -ldl "${io_flags[@]}"
 echo "built $out/$name"

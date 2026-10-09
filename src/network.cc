@@ -287,8 +287,14 @@ void finish_listing()
         libvlc_media_list_unlock(subs);
         libvlc_media_list_release(subs);
     }
-    /* Folders A-Z; a playlist (TV channels, radio) keeps its own order. */
-    bool playlist = list_url.compare(0, 4, "http") == 0;
+    /* Folders A-Z; a playlist (TV channels, radio, an .m3u on a share)
+     * keeps its own order. */
+    std::string bare = list_url.substr(0, list_url.find('?'));
+    size_t dot = bare.rfind('.');
+    std::string ext = dot == std::string::npos ? "" : bare.substr(dot + 1);
+    for (char &c : ext)
+        c = (char)tolower((unsigned char)c);
+    bool playlist = list_url.compare(0, 4, "http") == 0 || ext == "m3u" || ext == "m3u8" || ext == "pls";
     if (!playlist)
         std::stable_sort(entries.begin(), entries.end(), [](const NetEntry &a, const NetEntry &b) {
             if (a.dir != b.dir)

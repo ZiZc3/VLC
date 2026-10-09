@@ -1,0 +1,94 @@
+--- a/src/dvd_input.c
++++ b/src/dvd_input.c
+@@ -103,6 +103,10 @@
+ 
+   /* dummy file input */
+   int fd;
++
++  /* VLC-PS5: a stream (DVDOpenStream) without libdvdcss */
++  dvd_reader_stream_cb *stream_cb;
++  uint64_t pos;
+ };
+ 
+ static dvd_input_t dvd_input_New(void *priv, dvd_logger_cb *logcb)
+@@ -199,12 +203,26 @@
+  */
+ static dvd_input_t file_open(void *priv, dvd_logger_cb *logcb,
+                              const char *target,
+-                             dvd_reader_stream_cb *stream_cb UNUSED)
++                             dvd_reader_stream_cb *stream_cb)
+ {
+   dvd_input_t dev;
+ 
+-  if(target == NULL)
+-    return NULL;
++  if(target == NULL) {
++    /* VLC-PS5: no libdvdcss, so the plain input reads the stream itself
++     * (a DVD image on a network share). Unencrypted discs only. */
++    if(priv == NULL || stream_cb == NULL || !stream_cb->pf_seek || !stream_cb->pf_read)
++      return NULL;
++    dev = dvd_input_New(priv, logcb);
++    if(dev == NULL)
++      return NULL;
++    dev->fd = -1;
++    dev->stream_cb = stream_cb;
++    if(stream_cb->pf_seek(priv, 0) != 0) {
++      free(dev);
++      return NULL;
++    }
++    return dev;
++  }
+   /* Allocate the library structure */
+   dev = dvd_input_New(priv, logcb);
+   if(dev == NULL) {
+@@ -256,6 +274,14 @@
+ {
+   off_t pos;
+ 
++  if(dev->stream_cb) {
++    uint64_t to = (uint64_t)blocks * DVD_VIDEO_LB_LEN;
++    if(dev->stream_cb->pf_seek(dev->priv, to) != 0)
++      return -1;
++    dev->pos = to;
++    return blocks;
++  }
++
+   pos = lseek(dev->fd, (off_t)blocks * (off_t)DVD_VIDEO_LB_LEN, SEEK_SET);
+   if(pos < 0) {
+     return pos;
+@@ -283,6 +309,26 @@
+   len = (size_t)blocks * DVD_VIDEO_LB_LEN;
+   bytes = 0;
+ 
++  if(dev->stream_cb) {
++    while(len > 0) {
++      int chunk = len > (1 << 30) ? (1 << 30) : (int)len;
++      int ret = dev->stream_cb->pf_read(dev->priv, ((char*)buffer) + bytes, chunk);
++      if(ret < 0)
++        return ret;
++      if(ret == 0)
++        break;
++      len -= ret;
++      bytes += ret;
++      dev->pos += ret;
++    }
++    if(bytes % DVD_VIDEO_LB_LEN) {
++      /* back to the last whole block, as the file input does */
++      dev->pos -= bytes % DVD_VIDEO_LB_LEN;
++      dev->stream_cb->pf_seek(dev->priv, dev->pos);
++    }
++    return (int) (bytes / DVD_VIDEO_LB_LEN);
++  }
++
+   while(len > 0) {
+     ssize_t ret = read(dev->fd, ((char*)buffer) + bytes, len);
+ 
+@@ -318,7 +364,7 @@
+ {
+   int ret;
+ 
+-  ret = close(dev->fd);
++  ret = dev->stream_cb ? 0 : close(dev->fd);
+ 
+   free(dev);
+ 

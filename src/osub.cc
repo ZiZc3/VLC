@@ -32,7 +32,7 @@
 namespace {
 
 const char *API_HOST = "api.opensubtitles.com";
-const char *USER_AGENT = "VLC-PS5 v0.1";
+const char *USER_AGENT = "VLC-PS5 v" VLC_PS5_VERSION;
 
 /* ---- what the interface sees ---- */
 

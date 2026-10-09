@@ -1,0 +1,17 @@
+diff -ru a/modules/access/dvdnav.c b/modules/access/dvdnav.c
+--- a/modules/access/dvdnav.c
++++ b/modules/access/dvdnav.c
+@@ -89,6 +89,13 @@
+ static int  AccessDemuxOpen ( vlc_object_t * );
+ static void Close( vlc_object_t * );
+
++/* VLC-PS5: configure looks for dvdnav_stream_cb with the plain preprocessor,
++ * without the cross prefix's include path, so it never finds it. libdvdnav
++ * 6.1 has it: DVD ISOs on a share or a link need this demux. */
++#ifndef HAVE_STREAM_CB_IN_DVDNAV_H
++# define HAVE_STREAM_CB_IN_DVDNAV_H 1
++#endif
++
+ #if DVDREAD_VERSION >= 50300 && defined( HAVE_STREAM_CB_IN_DVDNAV_H )
+ #define HAVE_DVDNAV_DEMUX
+ static int  DemuxOpen ( vlc_object_t * );

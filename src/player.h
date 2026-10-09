@@ -40,12 +40,20 @@ libvlc_instance_t *player_vlc();
 bool player_open(const std::string &path, int64_t start_ms, const std::vector<std::string> &options = {});
 /* The same with a media VLC made (an entry of a listed playlist, with the options
  * its list gave it); takes the reference. path: what it's called in the log. */
-bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms);
+bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms,
+                       const std::vector<std::string> &options = {});
 void player_stop();
 bool player_active();    /* a file is open (playing, paused, buffering) */
 bool player_ended();     /* the file played to its end (or failed) */
 bool player_failed();
 bool player_buffering(); /* opening or buffering: no picture moving yet */
+/* Disc menus: the main menu (DVD root, Blu-ray Top Menu) or a Blu-ray's
+ * pop-up menu; whether the Blu-ray playing has one. */
+/* The Blu-ray region VLC plays as (A, B, C), from the next file. */
+std::string player_bluray_region();
+void player_set_bluray_region(const std::string &region);
+void player_disc_menu(bool popup);
+bool player_disc_has_popup();
 bool player_paused();
 void player_toggle_pause();
 int64_t player_time();   /* ms */
@@ -62,7 +70,8 @@ std::vector<Track> player_subtitle_tracks();
 int player_subtitle_track();
 void player_set_subtitle_track(int id);
 /* Adds a subtitle file (.srt, .ass, ...) to what plays and selects it. */
-bool player_add_subtitle(const std::string &path);
+bool player_add_subtitle(const std::string &path); /* a local path, or a share's / a link's address */
+bool player_is_subtitle_name(const std::string &name); /* .srt, .ass, .vtt... */
 const VideoInfo &player_video_info();
 
 /* A 360° video: where the view looks (degrees) and how wide it sees. */
@@ -70,6 +79,8 @@ void player_view(float yaw, float pitch, float fov);
 
 /* A DVD / Blu-ray menu: 0 activate, 1 up, 2 down, 3 left, 4 right. */
 void player_navigate(int action);
+/* A disc's menu is on screen (its current title is a menu). */
+bool player_in_menu();
 
 /* The sound being heard, as n bands from bass to treble (0..1 each). */
 void player_spectrum(float *bands, int n);

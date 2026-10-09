@@ -171,6 +171,9 @@ std::string vlc_message(const std::string &m)
     }
     if (m.compare(0, 14, "Please provide") == 0)
         return "A Windows PC takes its own account; a NAS, the user you made on it.";
+    /* libbluray without a JVM (none runs on the console): not "install Java" */
+    if (m.compare(0, 30, "This Blu-ray disc requires Java") == 0)
+        return "This Blu-ray's menus are made in Java, which the PS5 can't run: it plays without them";
     if (m.compare(0, 6, "Track ") == 0 && m.size() > 6 && isdigit((unsigned char)m[6]))
         return trf("Track %d", atoi(m.c_str() + 6));
     return m;
@@ -1042,14 +1045,73 @@ bool audio_name(const std::string &name)
     return false;
 }
 
+/* A file on a share by its name, as ci_file() kinds: 0 video, 1 audio,
+ * 3 text, 4 image, 5 another file (subtitles, databases...). */
+int name_kind(const std::string &name)
+{
+    if (audio_name(name))
+        return 1;
+    std::string ext = name.substr(name.rfind('.') + 1);
+    for (char &c : ext)
+        c = (char)tolower((unsigned char)c);
+    for (const char *x : { "jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff" })
+        if (ext == x)
+            return 4;
+    for (const char *x : { "txt", "nfo", "diz", "log", "md" })
+        if (ext == x)
+            return 3;
+    for (const char *x : { "srt", "ass", "ssa", "sub", "idx", "vtt", "sup", "db", "ini", "sfv", "cue", "exe", "pdf" })
+        if (ext == x)
+            return 5;
+    return 0;
+}
+
+/* A list of links (IPTV channels, radio), not a stream: .m3u and .pls, and
+ * .m3u8 unless it's online (an online .m3u8 is usually a live HLS stream). */
+bool is_playlist_url(const std::string &url)
+{
+    std::string u = url.substr(0, url.find('?'));
+    size_t dot = u.rfind('.');
+    if (dot == std::string::npos || u.find('/', dot) != std::string::npos)
+        return false;
+    const char *x = u.c_str() + dot + 1;
+    if (!strcasecmp(x, "m3u8"))
+        return u.compare(0, 4, "http") != 0;
+    return !strcasecmp(x, "m3u") || !strcasecmp(x, "pls");
+}
+
+/* file:///abs/path with everything but plain characters escaped. */
+std::string file_uri(std::string path)
+{
+    std::string uri = "file://";
+    if (path[0] != '/') { /* the test build's data folder is relative */
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)))
+            path = std::string(cwd) + "/" + path;
+    }
+    for (unsigned char c : path) {
+        if (isalnum(c) || strchr("/-_.~", c)) {
+            uri += (char)c;
+        } else {
+            char hex[4];
+            snprintf(hex, sizeof(hex), "%%%02X", c);
+            uri += hex;
+        }
+    }
+    return uri;
+}
+
 void rebuild_browse()
 {
     browse_entries.clear();
     auto &items = L();
     if (!net_path.empty()) {
         if (net_list_state() == NET_READY)
-            for (const NetEntry &e : net_list_entries())
-                browse_entries.push_back({ e.name, e.url, e.dir, -1, false, e.dir ? NET_DIR : NET_FILE });
+            for (const NetEntry &e : net_list_entries()) {
+                /* a channel list on a share opens like a folder */
+                bool list = !e.dir && is_playlist_url(e.url);
+                browse_entries.push_back({ e.name, e.url, e.dir, -1, list, e.dir || list ? NET_DIR : NET_FILE });
+            }
         return;
     }
     if (browse_dir.empty()) {
@@ -1252,9 +1314,26 @@ int current_item()
     return m ? (int)(m - &L()[0]) : -1;
 }
 
+void net_enter(const std::string &url, const std::string &name);
+
+/* A playlist with links (IPTV channels, radio): its entries in Browse, where
+ * each one plays as a stream. */
+void open_channel_list(const std::string &path)
+{
+    std::string name = path.substr(path.rfind('/') + 1);
+    name = name.substr(0, name.rfind('.'));
+    screen = LIBRARY;
+    tab = BROWSE;
+    net_enter(file_uri(path), name);
+}
+
 /* A playlist file: its files, from the first (or a random one with shuffle). */
 void play_playlist(const std::string &path)
 {
+    if (library_playlist_has_links(path)) {
+        open_channel_list(path);
+        return;
+    }
     std::vector<int> list = library_playlist_items(path);
     if (list.empty()) {
         toast("No files of this playlist are in the library", 3);
@@ -2032,6 +2111,23 @@ const std::vector<int> &playlist_items_cached(const std::string &path)
     return c.items;
 }
 
+/* How many entries a playlist names: its library files, or every line of a
+ * channel list (links aren't library files). */
+int playlist_count_cached(const std::string &path)
+{
+    struct Cached {
+        double at;
+        int n;
+    };
+    static std::unordered_map<std::string, Cached> cache;
+    Cached &c = cache[path];
+    if (c.at == 0 || now - c.at > 3) {
+        c.n = library_playlist_has_links(path) ? library_playlist_count(path) : (int)playlist_items_cached(path).size();
+        c.at = now;
+    }
+    return c.n;
+}
+
 /* A picture covering (x, y, w, h): the thumbnail cropped to that shape. */
 void thumb_cover(const MediaItem &m, float x, float y, float w, float h, float round, ImDrawFlags corners)
 {
@@ -2118,8 +2214,7 @@ void playlist_card(float x, float y, float w, const PlaylistFile *pl, float f)
     if (pl) {
         playlist_cover(pl->path, cx, cy, cw, ch, 16);
         /* how many, bottom right, like a video's length */
-        const std::vector<int> &items = playlist_items_cached(pl->path);
-        std::string count = std::to_string(items.size());
+        std::string count = std::to_string(playlist_count_cached(pl->path));
         float tw = text_size(f_semi, 18, count.c_str()).x;
         rect(cx + cw - tw - 54, cy + ch - 40, tw + 44, 28, IM_COL32(0, 0, 0, 170), 8);
         icon_list(cx + cw - tw - 38, cy + ch - 26, 16, C_TEXT);
@@ -2164,6 +2259,8 @@ void tab_playlists()
             if (pl_focus == 0) {
                 pl_add_file.clear();
                 open_playlist_name("");
+            } else if (library_playlist_has_links(pls[pl_focus - 1].path)) {
+                open_channel_list(pls[pl_focus - 1].path);
             } else {
                 pl_open = pls[pl_focus - 1].path;
                 pl_item_focus = 0;
@@ -2394,26 +2491,11 @@ void net_enter(const std::string &url, const std::string &name);
 
 void open_archive(const MediaItem &m)
 {
-    std::string uri = "file://", path = m.path;
-    if (path[0] != '/') { /* the test build's data folder is relative */
-        char cwd[1024];
-        if (getcwd(cwd, sizeof(cwd)))
-            path = std::string(cwd) + "/" + path;
-    }
-    for (unsigned char c : path) {
-        if (isalnum(c) || strchr("/-_.~", c)) {
-            uri += (char)c;
-        } else {
-            char hex[4];
-            snprintf(hex, sizeof(hex), "%%%02X", c);
-            uri += hex;
-        }
-    }
     tab = BROWSE;
     std::string ext = m.ext;
     for (char &c : ext)
         c = (char)tolower((unsigned char)c);
-    net_enter(uri, m.name + "." + ext);
+    net_enter(file_uri(m.path), m.name + "." + ext);
 }
 
 /* Opens a network place in Browse (a server, or a folder on it). */
@@ -2424,6 +2506,80 @@ void net_enter(const std::string &url, const std::string &name)
     browse_focus = 0;
     browse_scroll = 0;
     rebuild_browse();
+}
+
+/* ---- picking a subtitle file for the video playing (Tracks › Add a
+ * subtitle file): Browse, from anywhere it reaches, then back to the video */
+std::string link_name(const std::string &url);
+bool sub_pick;
+bool sub_pick_resume;  /* it was playing: it plays on after */
+std::string sub_pick_dir;
+std::vector<std::pair<std::string, std::string>> sub_pick_net;
+
+void start_sub_pick()
+{
+    pressed = 0; /* the ✕ that asked is used up: the player mustn't pause on it too */
+    sub_pick = true;
+    sub_pick_resume = !player_paused();
+    if (sub_pick_resume)
+        player_toggle_pause();
+    fprintf(stderr, "ui: picking a subtitle file (%s)\n", sub_pick_resume ? "paused the video" : "the video was paused");
+    /* what Browse showed before comes back after */
+    sub_pick_dir = browse_dir;
+    sub_pick_net = net_path;
+    modal = NONE;
+    screen = LIBRARY;
+    screen_fade = 0;
+    tab = BROWSE;
+    library_set_busy(false);
+    /* It starts at the top (Sources): the media folder, drives and shares
+     * alike, whatever the video came from; a subtitle can be anywhere. */
+    net_path.clear();
+    browse_dir.clear();
+    net_list_stop();
+    rebuild_browse();
+    browse_focus = 0;
+    browse_scroll = 0;
+}
+
+void end_sub_pick(std::string picked) /* a copy: it may be a Browse entry, and Browse is rebuilt below */
+{
+    pressed = 0;
+    sub_pick = false;
+    net_path = sub_pick_net;
+    browse_dir = sub_pick_dir;
+    if (!net_path.empty())
+        net_list(net_path.back().first);
+    else
+        net_list_stop();
+    rebuild_browse();
+    browse_focus = 0;
+    screen = PLAYER;
+    screen_fade = 0;
+    library_set_busy(true);
+    osd_until = now + 3.5;
+    /* playing again first: a subtitle added to a paused file left VLC paused
+     * after the resume */
+    if (sub_pick_resume && player_paused())
+        player_toggle_pause();
+    if (!picked.empty()) {
+        std::string name = picked.find("://") != std::string::npos ? link_name(picked)
+                                                                   : picked.substr(picked.rfind('/') + 1);
+        if (player_add_subtitle(picked))
+            toast(trf("Subtitles: %s", name.c_str()), 2.5);
+        else
+            toast("Couldn't load that subtitle file", 2.5);
+    }
+    fprintf(stderr, "ui: subtitle pick done (%s)\n", picked.empty() ? "none" : "picked");
+}
+
+/* ✕ on a file while picking: a subtitle file goes in, anything else says so. */
+void sub_pick_file(std::string path, std::string name) /* copies, as above */
+{
+    if (player_is_subtitle_name(name))
+        end_sub_pick(path);
+    else
+        toast("That isn't a subtitle file (.srt, .ass, .vtt...)", 2.5);
 }
 
 /* "1.4 GB" */
@@ -2454,7 +2610,9 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
         *type = e.path == "tv:" ? "Channel lists (iptv-org)" : "Stations (radio-browser.info)";
         *group = 2;
     } else if (e.net == NET_DIR) {
-        *type = "File folder";
+        *type = e.playlist ? "Playlist" : "File folder";
+        if (e.playlist && e.name.rfind('.') != std::string::npos && e.name.rfind('.') > 0)
+            *name = e.name.substr(0, e.name.rfind('.')); /* like local playlists */
     } else if (e.net == NET_FILE) {
         size_t dot = e.name.rfind('.');
         bool has_ext = dot != std::string::npos && dot > 0 && e.name.size() - dot <= 6;
@@ -2464,7 +2622,10 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
             std::string ext = e.name.substr(dot + 1);
             for (char &c : ext)
                 c = (char)toupper((unsigned char)c);
-            *type = ext + (audio_name(e.name) ? " audio" : " video");
+            int k = name_kind(e.name);
+            *type = k == 3 ? std::string(tr("Text document"))
+                  : k == 5 ? trf("%s file", ext.c_str())
+                           : trf(k == 4 ? "%s image" : k == 1 ? "%s audio" : "%s video", ext.c_str());
         } else {
             *type = "Live stream";
         }
@@ -2490,7 +2651,7 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
         *type = "File folder";
     } else if (e.item >= 0 && L()[e.item].disc) {
         const MediaItem &m = L()[e.item];
-        *type = m.ext == "ISO" ? "Disc image (ISO)" : m.ext == "DVD" ? "DVD (folder)" : "Blu-ray (folder)";
+        *type = m.ext == "ISO" || m.ext == "IMG" ? "Disc image (ISO)" : m.ext == "DVD" ? "DVD (folder)" : "Blu-ray (folder)";
     } else if (e.item >= 0 && L()[e.item].archive) {
         *type = trf("Compressed (%s)", L()[e.item].ext.c_str());
     } else if (e.item >= 0 && L()[e.item].other) {
@@ -2511,7 +2672,7 @@ void classic_icon(const BrowseEntry &e, float cx, float cy, float s)
     else if (e.net == NET_ONLINE)
         e.path == "tv:" ? ci_tv(cx, cy, s) : ci_radio(cx, cy, s);
     else if (e.net == NET_FILE)
-        ci_file(cx, cy, s, audio_name(e.name) ? 1 : 0);
+        ci_file(cx, cy, s, name_kind(e.name));
     else if (e.dir && browse_dir.empty() && net_path.empty() && e.net == NET_NONE)
         e.path == library_media_dir() ? ci_folder(cx, cy, s) : ci_drive(cx, cy, s, e.path.find("/usb") != std::string::npos);
     else if (e.dir)
@@ -2548,7 +2709,7 @@ void browse_draw_classic()
     tri(106, ay + ah / 2, 118, ay + ah / 2 - 10, 118, ay + ah / 2 + 10, arrow);
     rect(117, ay + ah / 2 - 3.5f, 13, 7, arrow);
     /* the path, in segments */
-    std::vector<std::string> segs = { "Sources" };
+    std::vector<std::string> segs = { sub_pick ? "Pick a subtitle file" : "Sources" };
     /* an archive opened from a folder: the folder's path, then inside it */
     bool in_archive = !net_path.empty() && net_path[0].first.compare(0, 7, "file://") == 0;
     if (!net_path.empty() && !in_archive)
@@ -2803,6 +2964,14 @@ void tab_browse()
             toast(std::string(1, letter_of(names[to])), 0.8);
         }
     }
+    if (sub_pick && hit(PAD_CIRCLE) && net_path.empty() && browse_dir.empty()) {
+        end_sub_pick(""); /* ○ at the top: back to the video, nothing picked */
+        return;
+    }
+    if (sub_pick && hit(PAD_CROSS) && n && browse_entries[browse_focus].net == NET_FILE) {
+        sub_pick_file(browse_entries[browse_focus].path, browse_entries[browse_focus].name);
+        return;
+    }
     if (hit(PAD_CROSS) && n && browse_entries[browse_focus].net != NET_NONE) {
         BrowseEntry e = browse_entries[browse_focus];
         if (e.net == NET_ADD) {
@@ -2840,8 +3009,14 @@ void tab_browse()
             rebuild_browse();
             return;
         }
+        if (sub_pick) {
+            std::string path = e.item >= 0 ? L()[e.item].path : e.path;
+            sub_pick_file(path, path.substr(path.rfind('/') + 1));
+            return;
+        }
         if (e.playlist) {
-            play_playlist(e.path);
+            /* its entries, like a folder: pick a channel or a song */
+            net_enter(file_uri(e.path), e.name);
             return;
         }
         std::vector<int> list;
@@ -2870,7 +3045,7 @@ void tab_browse()
         return;
     }
     /* Breadcrumb: "Media › Movies", not the raw path. */
-    std::string crumb = tr("Sources");
+    std::string crumb = tr(sub_pick ? "Pick a subtitle file" : "Sources");
     bool in_archive = !net_path.empty() && net_path[0].first.compare(0, 7, "file://") == 0;
     if (!net_path.empty() && !in_archive)
         crumb = tr("Network");
@@ -2909,8 +3084,17 @@ void tab_browse()
             icon_radio(146, y + 33, 34, mix(C_DIM, C_ORANGE, f));
         else if (e.net == NET_ADD)
             icon_plus_circle(146, y + 33, 32, mix(C_DIM, C_ORANGE, f));
-        else if (e.net == NET_FILE)
-            audio_name(e.name) ? icon_note(146, y + 33, 28, C_DIM) : icon_film(146, y + 33, 34, C_DIM);
+        else if (e.net == NET_FILE) {
+            int k = name_kind(e.name);
+            if (k == 1)
+                icon_note(146, y + 33, 28, C_DIM);
+            else if (k == 4)
+                icon_picture(146, y + 33, 34, C_DIM);
+            else if (k == 3 || k == 5)
+                icon_list(146, y + 33, 30, k == 5 ? C_FAINT : C_DIM);
+            else
+                icon_film(146, y + 33, 34, C_DIM);
+        }
         else if (e.dir)
             icon_folder(146, y + 33, 34, mix(C_DIM, C_ORANGE, f));
         else if (e.playlist)
@@ -3389,8 +3573,25 @@ std::string stream_name;
 void start_stream(const std::string &url, const std::vector<std::string> &options, bool remember,
                   const std::string &name, libvlc_media_t *media)
 {
+    if (is_playlist_url(url)) {
+        /* A channel list (typed, or a file on a share): its entries in Browse. */
+        if (remember)
+            remember_link(url);
+        screen = LIBRARY;
+        tab = BROWSE;
+        net_enter(url, name.empty() ? link_name(url) : name);
+        return;
+    }
     music_bg = false;
-    stream_options = options;
+    std::vector<std::string> opts = options;
+    std::string bare = url.substr(0, url.find('?'));
+    if (bare.size() > 4 && (!strcasecmp(bare.c_str() + bare.size() - 4, ".iso") || !strcasecmp(bare.c_str() + bare.size() - 4, ".img")) && url.compare(0, 7, "file://") != 0 &&
+        std::find(opts.begin(), opts.end(), ":demux=dvd,any") == opts.end())
+        /* A disc image on a share or a link: VLC's DVD reader only tries it by
+         * itself on fast-seeking sources (not SMB), so ask for it first; a
+         * Blu-ray image falls through to the Blu-ray reader ("any"). */
+        opts.push_back(":demux=dvd,any");
+    stream_options = opts;
     stream_remember = remember;
     stream_name = name;
     playing_path = url;
@@ -3402,11 +3603,11 @@ void start_stream(const std::string &url, const std::vector<std::string> &option
     library_set_busy(true);
     bool opened;
     if (media) {
-        for (const std::string &o : options)
+        for (const std::string &o : opts)
             libvlc_media_add_option(media, o.c_str());
-        opened = player_open_media(media, url, 0);
+        opened = player_open_media(media, url, 0, opts);
     } else {
-        opened = player_open(url, 0, options);
+        opened = player_open(url, 0, opts);
     }
     if (!opened) {
         toast("Couldn't open that link", 3);
@@ -4558,13 +4759,13 @@ void setup_begin(bool with_logo);
 enum {
     ST_DECODING, ST_ALANG, ST_SLANG, ST_SOUND, ST_NIGHT, ST_SPEAKERS, ST_THEME, ST_HAPTICS,
     ST_SWIPES, ST_REPEAT, ST_SHUFFLE, ST_DEBUG, ST_STORAGE, ST_VERSION, ST_RELOAD, ST_ABOUT,
-    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_COUNT
+    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_COUNT
 };
 const char *const st_labels[ST_COUNT] = {
     "Decoding", "Audio language", "Subtitle language", "Sound output", "Night mode",
     "Speaker test", "Theme", "Controller vibration", "Touchpad swipes", "Repeat the list", "Shuffle",
     "Detailed log", "Storage", "Version", "Reload drives", "About VLC", "Phone access", "Look",
-    "Subtitle downloads", "Language", "Run setup again",
+    "Subtitle downloads", "Language", "Run setup again", "Blu-ray region",
 };
 /* One line under the focused setting: what it does. */
 const char *const st_help[ST_COUNT] = {
@@ -4589,6 +4790,7 @@ const char *const st_help[ST_COUNT] = {
     "Your own free OpenSubtitles API key (and account), here or from the phone page",
     "The language of VLC's menus",
     "Language, look and playback, chosen again",
+    "A: the Americas and East Asia. B: Europe, Africa and Oceania. C: China, Russia and India",
 };
 
 /* Categories: an icon, a name, and their settings. */
@@ -4599,7 +4801,7 @@ struct SettingsCat {
 };
 enum { SI_PLAY, SI_SOUND, SI_THEME, SI_LIST, SI_GEAR };
 const SettingsCat settings_cats[] = {
-    { "Playback", SI_PLAY, { ST_DECODING, ST_ALANG, ST_SLANG, ST_OSUB } },
+    { "Playback", SI_PLAY, { ST_DECODING, ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION } },
     { "Sound", SI_SOUND, { ST_SOUND, ST_NIGHT, ST_SPEAKERS } },
     { "Interface", SI_THEME, { ST_UILANG, ST_LOOK, ST_THEME, ST_SWIPES } },
     { "Playlists", SI_LIST, { ST_REPEAT, ST_SHUFFLE } },
@@ -4724,6 +4926,7 @@ void setting_icon(int id, float cx, float cy, float s, ImU32 col)
     case ST_DECODING: si_chip(cx, cy, s, col); break;
     case ST_ALANG: case ST_UILANG: si_globe(cx, cy, s, col); break;
     case ST_SLANG: case ST_OSUB: icon_cc(cx, cy, s * 0.9f, col); break;
+    case ST_BDREGION: si_globe(cx, cy, s, col); break;
     case ST_SOUND: icon_speaker(cx, cy, s * 0.85f, col); break;
     case ST_NIGHT: si_moon(cx, cy, s, col); break;
     case ST_SPEAKERS: si_surround(cx, cy, s, col); break;
@@ -4794,6 +4997,7 @@ std::string st_value(int id)
     }
     case ST_WEB: return web_running() ? "On" : "Off";
     case ST_ABOUT: return "v" VLC_PS5_VERSION;
+    case ST_BDREGION: return trf("Region %s", player_bluray_region().c_str());
     default: return "";
     }
 }
@@ -4807,6 +5011,14 @@ void st_change(int id, int step)
         break;
     case ST_ALANG: cycle_language(false, dir); break;
     case ST_SLANG: cycle_language(true, dir); break;
+    case ST_BDREGION: {
+        static const char *const regions[3] = { "A", "B", "C" };
+        std::string r = player_bluray_region();
+        int i = r == "B" ? 1 : r == "C" ? 2 : 0;
+        player_set_bluray_region(regions[(i + 3 + dir) % 3]);
+        toast("Blu-ray region: from the next disc you open", 2.5);
+        break;
+    }
     case ST_SOUND:
         player_set_audio_output(!player_audio_output());
         toast(player_audio_output() ? "Surround: 5.1 / 7.1 files from the next one you open" : "Stereo from the next file", 3);
@@ -5414,12 +5626,24 @@ struct PanelEntry {
     std::string shown; /* kind 7: the value, right-aligned */
 };
 
+/* A disc plays: from the library, dvd:// / bluray://, or an .iso / .img
+ * from a share or a link. */
+bool playing_disc()
+{
+    int cur_item = current_item();
+    std::string bare = playing_path.substr(0, playing_path.find('?'));
+    return (cur_item >= 0 && L()[cur_item].disc) || playing_path.compare(0, 6, "dvd://") == 0 ||
+           playing_path.compare(0, 9, "bluray://") == 0 ||
+           (bare.size() > 4 && (!strcasecmp(bare.c_str() + bare.size() - 4, ".iso") || !strcasecmp(bare.c_str() + bare.size() - 4, ".img")));
+}
+
 /* The settings rows (PanelEntry kind 7). */
 enum {
     SET_AUDIO_DELAY, SET_EQ, SET_SUB_DELAY, SET_SUB_SIZE, SET_SUB_COLOUR, SET_SUB_BOX, SET_SLEEP,
     SET_LOOP, SET_DEINT, SET_BRIGHT, SET_CONTRAST, SET_SAT, SET_GAMMA, SET_HUE, SET_ROTATE, SET_FLIP,
     SET_SHARPEN, SET_PIC_RESET,
     SET_SOUND_OUT, SET_NIGHT, SET_REPEAT, SET_SHUFFLE, SET_BOOKMARK, SET_BM_CLEAR, SET_OSUB,
+    SET_DISC_MENU, SET_POPUP, SET_SUB_PICK,
 };
 
 std::string ms_text(int64_t ms)
@@ -5502,6 +5726,18 @@ void setting_change(int id, int step)
     case SET_OSUB:
         if (step == 0)
             open_osub_results();
+        return;
+    case SET_SUB_PICK:
+        if (step == 0)
+            start_sub_pick();
+        return;
+    case SET_DISC_MENU:
+    case SET_POPUP:
+        /* the menu shows over the film: the panel gets out of its way */
+        if (step == 0) {
+            player_disc_menu(id == SET_POPUP);
+            modal = NONE;
+        }
         return;
     case SET_AUDIO_DELAY:
         player_set_audio_delay(step ? player_audio_delay() + step * 50 : 0);
@@ -5664,12 +5900,18 @@ void modal_tracks()
         }
         for (const std::string &f : files)
             e.push_back({ 6, 0, trf("Load  %s", f.substr(f.rfind('/') + 1).c_str()), false, f });
+        e.push_back({ 7, SET_SUB_PICK, "Add a subtitle file", false, "" });
         e.push_back({ 7, SET_OSUB, "Download subtitles", false, "" });
     }
     if (all || panel_section == SEC_SPEED) {
         e.push_back({ 0, 0, "Playback", false, "" });
         e.push_back({ 7, SET_REPEAT, "Loop this video", false, "" });
         e.push_back({ 7, SET_SHUFFLE, "Shuffle", false, "" });
+        if (playing_disc()) {
+            e.push_back({ 7, SET_DISC_MENU, "Disc menu", false, "" });
+            if (player_disc_has_popup())
+                e.push_back({ 7, SET_POPUP, "Pop-up menu", false, "" });
+        }
         e.push_back({ 7, SET_SLEEP, "Sleep timer", false, "" });
         e.push_back({ 7, SET_LOOP, "A-B repeat", false, "" });
         e.push_back({ 7, SET_BOOKMARK, "Add a bookmark here", false, "" });
@@ -5852,7 +6094,7 @@ void modal_tracks()
         const char *act = id == SET_LOOP ? (loop_a < 0 ? "Mark A" : loop_b < 0 ? "Mark B" : "Clear")
                         : id == SET_SUB_BOX || id == SET_NIGHT || id == SET_SOUND_OUT || id == SET_SHUFFLE ? "Switch"
                         : id == SET_REPEAT ? "Switch" : id == SET_BOOKMARK ? "Add"
-                        : id == SET_BM_CLEAR ? "Clear" : "Reset";
+                        : id == SET_BM_CLEAR ? "Clear" : id == SET_DISC_MENU || id == SET_POPUP || id == SET_SUB_PICK ? "Open" : "Reset";
         hints(1920 - 48, 1040, { { PAD_CROSS, act }, { PAD_CIRCLE, "Close" } }, a);
     }
     else
@@ -6614,16 +6856,23 @@ void player_screen()
     }
     /* A disc: the d-pad and ✕ drive its menu while the controls are hidden
      * (the touchpad brings them up). */
-    int cur_item = current_item();
-    bool disc = (cur_item >= 0 && L()[cur_item].disc) || playing_path.compare(0, 6, "dvd://") == 0 ||
-                playing_path.compare(0, 9, "bluray://") == 0;
+    bool disc = playing_disc();
     const uint32_t menu_keys = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT | PAD_CROSS;
-    bool menu_press = disc && modal == NONE && !osd_was_up && !paused && (pressed & menu_keys);
+    /* A disc menu with buttons on screen (in the film ✕ pauses as usual): the
+     * D-pad and ✕ press its buttons straight away, and the controls stay out
+     * of the way unless the touchpad asked for them. */
+    static bool osd_touch; /* the controls were brought up with the touchpad */
+    if (now >= osd_until)
+        osd_touch = false;
+    bool in_menu = disc && player_in_menu() && modal == NONE && !paused;
+    if (in_menu && !osd_touch)
+        osd_until = std::min(osd_until, now);
+    bool menu_press = in_menu && !(osd_was_up && osd_touch) && (pressed & menu_keys);
     if (menu_press) {
         player_navigate(hit(PAD_CROSS) ? 0 : hit(PAD_UP) ? 1 : hit(PAD_DOWN) ? 2 : hit(PAD_LEFT) ? 3 : 4);
         pressed &= ~menu_keys;
     }
-    if (pressed && modal == NONE)
+    if (pressed && modal == NONE && (!in_menu || osd_touch))
         osd_until = now + 4.0;
     bool osd = now < osd_until || paused || scrubbing;
 
@@ -6652,6 +6901,7 @@ void player_screen()
             return;
         } else if (hit(PAD_TOUCHPAD)) {
             osd_until = osd ? now : now + 4.0;
+            osd_touch = !osd;
         } else if (hit(PAD_L1) || hit(PAD_R1)) {
             std::vector<Chapter> ch = player_chapters();
             if (ch.empty()) {
@@ -7592,7 +7842,9 @@ void ui_frame(const PadState &pad, float frame_dt)
     } else {
         background();
         tab_bar();
-        if (modal == NONE) {
+        if (sub_pick)
+            tab = BROWSE; /* picking: Browse only */
+        if (modal == NONE && !sub_pick) {
             if (hit(PAD_L1))
                 tab = (Tab)((tab + TABS - 1) % TABS);
             if (hit(PAD_R1))
@@ -7601,12 +7853,12 @@ void ui_frame(const PadState &pad, float frame_dt)
         uint32_t keep = pressed;
         if (modal != NONE)
             pressed = 0;
-        if (modal == NONE && hit(PAD_R3)) {
+        if (modal == NONE && !sub_pick && hit(PAD_R3)) {
             open_search();
             modal_anim = 1;
             pressed = 0;
         }
-        if (modal == NONE)
+        if (modal == NONE && !sub_pick)
             library_actions();
         switch (tab) {
         case HOME: tab_home(); break;
@@ -7640,8 +7892,15 @@ void ui_frame(const PadState &pad, float frame_dt)
                 h.push_back({ PAD_CIRCLE, "Back" });
             if (tab == PLAYLISTS)
                 h = playlist_hints();
-            h.push_back({ PAD_R3, "Search" });
-            h.push_back({ PAD_OPTIONS, "Options" });
+            if (sub_pick) {
+                bool file = browse_focus < (int)browse_entries.size() && !browse_entries[browse_focus].dir &&
+                            (browse_entries[browse_focus].net == NET_FILE || browse_entries[browse_focus].net == NET_NONE);
+                h = { { PAD_CROSS, file ? "Add" : "Open" },
+                      { PAD_CIRCLE, browse_dir.empty() && net_path.empty() ? "Cancel" : "Back" } };
+            } else {
+                h.push_back({ PAD_R3, "Search" });
+                h.push_back({ PAD_OPTIONS, "Options" });
+            }
             if (classic_look) {
                 if (tab == PLAYLISTS) {
                     if (pl_open.empty())

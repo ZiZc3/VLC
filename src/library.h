@@ -69,6 +69,10 @@ MediaItem *library_find(const std::string &path);
 std::vector<PlaylistFile> &library_playlists();
 /* The library files a playlist names, in its order (others are skipped). */
 std::vector<int> library_playlist_items(const std::string &path);
+/* Every entry it names, links and files alike. */
+int library_playlist_count(const std::string &path);
+/* It names links (http://, rtp://...): a channel list, opened in Browse. */
+bool library_playlist_has_links(const std::string &path);
 /* Playlists made in VLC: <media>/Playlists/<name>.m3u8, one absolute path a
  * line (with #EXTINF names), so VLC on a computer reads them too. Only these
  * are changed; ones found elsewhere just play. */

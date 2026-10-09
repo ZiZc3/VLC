@@ -1,0 +1,36 @@
+--- a/modules/text_renderer/freetype/freetype.c	2026-10-09 16:41:20.491780240 +0000
++++ b/modules/text_renderer/freetype/freetype.c	2026-10-09 16:41:20.492100340 +0000
+@@ -1081,6 +1081,33 @@
+ 
+     return psz_ucs4;
+ }
++#elif !defined( HAVE_ICONV )
++/* VLC-PS5: no iconv on the console (ToCharset gave nothing back, so plain-text
++ * subtitles drew nothing): the UTF-8 is read here, to native-endian UCS-4 as
++ * FREETYPE_TO_UCS asks; a bad byte becomes U+FFFD. */
++static void *ToUCS4( const char *in, size_t *outsize )
++{
++    size_t i_len = strlen( in );
++    uint32_t *p_out = vlc_alloc( i_len + 1, sizeof( *p_out ) );
++    if( unlikely( !p_out ) )
++        return NULL;
++    size_t i = 0;
++    while( *in )
++    {
++        uint32_t cp;
++        size_t i_bytes = vlc_towc( in, &cp );
++        if( i_bytes == 0 || i_bytes == (size_t)-1 )
++        {
++            cp = 0xFFFD;
++            i_bytes = 1;
++        }
++        p_out[i++] = cp;
++        in += i_bytes;
++    }
++    p_out[i] = 0;
++    *outsize = i * sizeof( *p_out );
++    return p_out;
++}
+ #else
+ # define ToUCS4( in, outsize ) ToCharset( FREETYPE_TO_UCS, ( in ), ( outsize ))
+ #endif

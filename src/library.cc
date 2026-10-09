@@ -193,7 +193,7 @@ void scan_dir(const std::string &dir, int depth)
         const char *x = *dot ? dot + 1 : dot;
         bool video = has_ext(x, video_exts), audio = has_ext(x, audio_exts);
         bool image = has_ext(x, image_exts), text = has_ext(x, text_exts);
-        bool archive = has_ext(x, archive_exts), iso = !strcasecmp(x, "iso");
+        bool archive = has_ext(x, archive_exts), iso = !strcasecmp(x, "iso") || !strcasecmp(x, "img"); /* a DVD image named .img */
         if (image) {
             /* an album's cover file isn't a photo of its own */
             std::string base = std::string(e->d_name, dot - e->d_name);
@@ -1436,6 +1436,45 @@ std::vector<int> library_playlist_items(const std::string &path)
     }
     fclose(f);
     return out;
+}
+
+int library_playlist_count(const std::string &path)
+{
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f)
+        return 0;
+    bool pls = path.size() > 4 && strcasecmp(path.c_str() + path.size() - 4, ".pls") == 0;
+    int n = 0;
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        const char *l = line;
+        while (*l == ' ' || *l == '\t' || (unsigned char)*l == 0xEF || (unsigned char)*l == 0xBB || (unsigned char)*l == 0xBF)
+            l++; /* indent, UTF-8 mark */
+        if (pls ? (!strncasecmp(l, "File", 4) && strchr(l, '=')) : (*l && *l != '#' && *l != '\r' && *l != '\n'))
+            n++;
+    }
+    fclose(f);
+    return n;
+}
+
+bool library_playlist_has_links(const std::string &path)
+{
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f)
+        return false;
+    bool links = false;
+    char line[4096];
+    while (!links && fgets(line, sizeof(line), f)) {
+        const char *l = line;
+        if (*l == '#')
+            continue;
+        if (!strncasecmp(l, "File", 4) && strchr(l, '='))
+            l = strchr(l, '=') + 1; /* .pls */
+        const char *scheme = strstr(l, "://");
+        links = scheme && scheme > l && strncasecmp(l, "file://", 7) != 0;
+    }
+    fclose(f);
+    return links;
 }
 
 /* ---- playlists made in VLC -------------------------------------------------------- */

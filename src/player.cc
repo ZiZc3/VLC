@@ -19,7 +19,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <ctype.h>
+#include <dirent.h>
 #include <math.h>
 #include <condition_variable>
 #include <deque>
@@ -37,6 +39,7 @@
 #include <vlc_common.h>
 #include <vlc_variables.h>
 #include <vlc_url.h>
+#include <vlc_stream.h>
 
 #include "gen/video_frag.h"
 #include "gen/video_vert.h"
@@ -45,6 +48,7 @@
 #include "lang.h"
 #include "platform.h"
 #include "prefs.h"
+#include "subconv.h"
 
 namespace {
 
@@ -87,6 +91,24 @@ bool restore_delays;
 double sub_check_at;
 size_t sub_check_count;
 bool sub_attach_all;   /* the reopen: every added file, wherever it is */
+/* Subtitle files beside a video on a share or a link, found in the background
+ * once it plays (src: side_subs_find). */
+struct SideSubs {
+    std::mutex lock;
+    std::string path;              /* the video they're for */
+    std::vector<std::string> uris; /* best first */
+    bool ready;
+    int serial;                    /* bumped by every open: an old search is dropped */
+} side;
+std::vector<std::string> source_options; /* the open's login options, for the folder listing */
+/* Subtitle files added by hand from a share or a link, read in the background:
+ * player_tick puts them in (when it's still the same file). */
+struct PendingSub {
+    std::string path, ready; /* ready: what VLC gets, "" = couldn't be read */
+    int serial;              /* side.serial when it was asked for */
+};
+std::mutex pending_lock;
+std::vector<PendingSub> pending_subs;
 
 /* ---- pictures -------------------------------------------------------------- */
 
@@ -900,6 +922,7 @@ void apply_saved_choices()
 
 std::vector<Chapter> chapters_cache;
 double chapters_tried;
+int chapters_title = -2; /* a disc's chapters belong to its current title */
 
 /* A slot's picture as RGB, cropped to what's visible: the shader's sums on
  * the CPU (BT.709 for HD, 601 below). */
@@ -967,9 +990,18 @@ bool player_init()
         /* HLS / DASH segments through the access modules: ps5http (the
          * console's HTTP service), not the adaptive module's own sockets. */
         "--adaptive-use-access",
+        /* No iconv on the console: subtitles are read as UTF-8 (VLC's CP1252
+         * fallback only logged "cannot convert" for every file). */
+        "--subsdec-encoding=UTF-8",
 #endif
         "--ignore-config",
         "--no-video-title-show",
+        /* Browse shows every file: VLC's listings (SMB, DLNA, ZIP/RAR) too, not
+         * only local folders. VLC hid m3u, images, subtitles, txt... there. */
+        "--ignore-filetypes=",
+        /* Subtitle files beside a video: our own search, for every source
+         * (side_subs_find); VLC's looked beside local files only. */
+        "--no-sub-autodetect-file",
         "--stats",                /* decoded/shown/lost pictures, for player_tick */
         "--aout=adummy",          /* replaced by our callbacks (World 1) */
         "--avcodec-threads=0",    /* one per core */
@@ -1084,13 +1116,327 @@ bool player_open(const std::string &path, int64_t start_ms, const std::vector<st
         return false;
     for (const std::string &o : options)
         libvlc_media_add_option(m, o.c_str());
-    return player_open_media(m, path, start_ms);
+    return player_open_media(m, path, start_ms, options);
 }
 
 std::string file_uri(const std::string &path);
 
-bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms)
+/* A subtitle file's address for VLC: a share's or a link's as it is, a
+ * local path made a file:// URI. */
+std::string sub_uri(const std::string &path)
 {
+    return path.find("://") != std::string::npos ? path : file_uri(path);
+}
+
+extern "C" input_thread_t *libvlc_get_input_thread(libvlc_media_player_t *);
+
+/* The language a subtitle file is most likely in, for one that isn't UTF-8:
+ * the subtitle language chosen, else the menus'. */
+std::string sub_lang_hint()
+{
+    std::string s = player_sub_language();
+    return s.empty() || s == "off" || s == "none" ? std::string(lang_code(lang_current())) : s;
+}
+
+/* A subtitle file on a share or a link, read through VLC as a child of the
+ * playing input (so a share's login comes with it); at most 8 MiB. False
+ * when it can't be opened (a link's guess that isn't there). */
+bool read_remote_sub(const std::string &uri, std::string *out)
+{
+    input_thread_t *input = nullptr;
+    /* the open may still be on its way */
+    for (int i = 0; i < 50 && !(input = libvlc_get_input_thread(mp)); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!input)
+        return false;
+    stream_t *s = vlc_stream_NewURL((vlc_object_t *)input, uri.c_str());
+    bool ok = s != nullptr;
+    out->clear();
+    if (s) {
+        char buf[65536];
+        ssize_t n;
+        while ((n = vlc_stream_Read(s, buf, sizeof(buf))) > 0 && out->size() < (8u << 20))
+            out->append(buf, (size_t)n);
+        vlc_stream_Delete(s);
+        ok = !out->empty();
+    }
+    vlc_object_release((vlc_object_t *)input);
+    return ok;
+}
+
+/* A subtitle file ready for VLC: a local path, or the address of one on a
+ * share or a link; one that isn't UTF-8 becomes a converted local copy
+ * (the console's VLC has no iconv). "" when a remote one can't be read. */
+std::string sub_ready(const std::string &path, const std::string &hint)
+{
+    if (path.find("://") == std::string::npos)
+        return subconv_local(path, hint);
+    std::string bytes;
+    if (!read_remote_sub(path, &bytes))
+        return "";
+    std::string b = path.substr(0, path.find_first_of("?#"));
+    char *name = vlc_uri_decode_duplicate(b.substr(b.rfind('/') + 1).c_str());
+    std::string copy = subconv_bytes(bytes, name ? name : "subtitle.srt", hint);
+    free(name);
+    return copy.empty() ? path : copy;
+}
+
+/* ---- subtitles beside the video ------------------------------------------------
+ * Ours, the same for every source: VLC's own search only looks beside local
+ * files, and the ones its share listings attach weren't turned on. A
+ * subtitle file goes with a video when its name starts with the video's
+ * (without the extension) followed by nothing or a separator: "Film.srt",
+ * "Film.en.srt", "Film - English.ass". Local folders and shares (SMB, FTP,
+ * SFTP, NFS) are listed; a link (http, https) is asked for Film.srt. */
+
+bool is_sub_name(const std::string &lower_name)
+{
+    static const char *const exts[] = { "srt", "ass", "ssa", "vtt", "sub", "idx", "smi", "sami", "ttml",
+                                        "usf", "jss", "psb", "rt", "mpl2", "pjs", "stl", "dks" };
+    size_t dot = lower_name.rfind('.');
+    if (dot == std::string::npos)
+        return false;
+    for (const char *e : exts)
+        if (lower_name.compare(dot + 1, std::string::npos, e) == 0)
+            return true;
+    return false;
+}
+
+std::string lowered(std::string s)
+{
+    for (char &c : s)
+        c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+/* name (a file's) goes with the video named base (no extension), both lowercase */
+bool sub_goes_with(const std::string &base, const std::string &name)
+{
+    if (base.empty() || name.size() <= base.size() || name.compare(0, base.size(), base) != 0 ||
+        !is_sub_name(name))
+        return false;
+    char c = name[base.size()];
+    return c == '.' || c == ' ' || c == '-' || c == '_' || c == '[' || c == '(';
+}
+
+/* The matches, best first: Film.srt, then the others by name; a VobSub .sub
+ * goes only through its .idx. */
+std::vector<std::string> sort_side_subs(const std::string &base, std::vector<std::string> names)
+{
+    std::vector<std::string> lower;
+    for (const std::string &n : names)
+        lower.push_back(lowered(n));
+    std::vector<size_t> order;
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string &l = lower[i];
+        if (l.size() > 4 && !l.compare(l.size() - 4, 4, ".sub") &&
+            std::find(lower.begin(), lower.end(), l.substr(0, l.size() - 4) + ".idx") != lower.end())
+            continue;
+        order.push_back(i);
+    }
+    std::string exact = base + ".srt";
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        bool ea = lower[a] == exact, eb = lower[b] == exact;
+        if (ea != eb)
+            return ea;
+        return lower[a] < lower[b];
+    });
+    std::vector<std::string> out;
+    for (size_t i : order)
+        out.push_back(names[i]);
+    return out;
+}
+
+/* A local video: its folder and the usual subtitle folders inside it. */
+std::vector<std::string> local_side_subs(const std::string &path)
+{
+    size_t slash = path.rfind('/');
+    if (slash == std::string::npos)
+        return {};
+    std::string dir = path.substr(0, slash), file = path.substr(slash + 1);
+    std::string base = lowered(file.substr(0, file.rfind('.')));
+    std::vector<std::string> found;
+    static const char *const subdirs[] = { "", "/Subs", "/subs", "/Subtitles", "/subtitles", "/Sub", "/sub" };
+    for (const char *sd : subdirs) {
+        std::string d = dir + sd;
+        DIR *h = opendir(d.c_str());
+        if (!h)
+            continue;
+        std::vector<std::string> names;
+        while (struct dirent *e = readdir(h))
+            if (e->d_name[0] != '.' && sub_goes_with(base, lowered(e->d_name)))
+                names.push_back(e->d_name);
+        closedir(h);
+        for (const std::string &n : sort_side_subs(base, names)) {
+            std::string full = d + "/" + n;
+            if (std::find(found.begin(), found.end(), full) == found.end())
+                found.push_back(full);
+        }
+    }
+    return found;
+}
+
+bool url_scheme_is(const std::string &url, const char *scheme)
+{
+    size_t n = strlen(scheme);
+    return url.size() > n + 3 && !strncasecmp(url.c_str(), scheme, n) && !url.compare(n, 3, "://");
+}
+
+/* A share or a link: in the background, then player_tick adds what it found. */
+void side_subs_find(const std::string &url, int serial)
+{
+    std::string bare = url.substr(0, url.find_first_of("?#"));
+    size_t slash = bare.rfind('/');
+    if (slash == std::string::npos || slash < bare.find("://") + 3)
+        return;
+    std::string parent = bare.substr(0, slash + 1), last = bare.substr(slash + 1);
+    char *dec = vlc_uri_decode_duplicate(last.c_str());
+    std::string file = dec ? dec : last;
+    free(dec);
+    size_t dot = file.rfind('.');
+    if (dot == std::string::npos || dot == 0)
+        return; /* a stream's address, not a file */
+    std::string ext = lowered(file.substr(dot + 1));
+    if (ext == "m3u8" || ext == "m3u" || ext == "mpd" || ext == "pls" || ext == "iso" || ext == "img" || is_sub_name(lowered(file)))
+        return;
+    std::string base = lowered(file.substr(0, dot));
+    bool listable = url_scheme_is(url, "smb") || url_scheme_is(url, "ftp") || url_scheme_is(url, "ftps") ||
+                    url_scheme_is(url, "sftp") || url_scheme_is(url, "nfs");
+    bool link = url_scheme_is(url, "http") || url_scheme_is(url, "https");
+    if (!listable && !link)
+        return;
+    std::vector<std::string> opts = source_options;
+    /* its own reference: a quit during the listing (up to 8 s) mustn't free
+     * VLC under it */
+    libvlc_instance_t *inst = vlc;
+    libvlc_retain(inst);
+    std::string hint = sub_lang_hint();
+    std::thread([=]() {
+        std::vector<std::string> uris;
+        if (link) {
+            /* No folder to list: the one most links have beside them. */
+            uris.push_back(bare.substr(0, bare.size() - (file.size() - dot)) + ".srt");
+            (void)base;
+        } else if (libvlc_media_t *m = libvlc_media_new_location(inst, parent.c_str())) {
+            for (const std::string &o : opts)
+                libvlc_media_add_option(m, o.c_str());
+            libvlc_media_parse_with_options(m, libvlc_media_parse_network, 8000);
+            for (int i = 0; i < 100 && libvlc_media_get_parsed_status(m) == 0; i++)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::vector<std::string> names, mrls;
+            if (libvlc_media_list_t *list = libvlc_media_subitems(m)) {
+                libvlc_media_list_lock(list);
+                for (int i = 0; i < libvlc_media_list_count(list); i++) {
+                    libvlc_media_t *c = libvlc_media_list_item_at_index(list, i);
+                    if (!c)
+                        continue;
+                    if (char *mrl = libvlc_media_get_mrl(c)) {
+                        std::string u = mrl;
+                        std::string b = u.substr(0, u.find_first_of("?#"));
+                        char *n = vlc_uri_decode_duplicate(b.substr(b.rfind('/') + 1).c_str());
+                        if (n && sub_goes_with(base, lowered(n))) {
+                            names.push_back(n);
+                            mrls.push_back(u);
+                        }
+                        free(n);
+                        free(mrl);
+                    }
+                    libvlc_media_release(c);
+                }
+                libvlc_media_list_unlock(list);
+                libvlc_media_list_release(list);
+            }
+            libvlc_media_release(m);
+            for (const std::string &n : sort_side_subs(base, names))
+                uris.push_back(mrls[std::find(names.begin(), names.end(), n) - names.begin()]);
+        }
+        /* read through VLC: one that isn't UTF-8 becomes a converted copy,
+         * a link's guess that isn't there is dropped */
+        std::vector<std::string> ready;
+        for (const std::string &u : uris) {
+            std::string r = sub_ready(u, hint);
+            if (!r.empty())
+                ready.push_back(r.find("://") == std::string::npos ? file_uri(r) : r);
+        }
+        uris.swap(ready);
+        libvlc_release(inst);
+        fprintf(stderr, "player: %zu subtitle file(s) beside %s\n", uris.size(), url.c_str());
+        std::lock_guard<std::mutex> g(side.lock);
+        if (side.serial != serial)
+            return;
+        side.path = url;
+        side.uris = uris;
+        side.ready = true;
+    }).detach();
+}
+
+/* Found ones go in once the video plays: the first turned on (unless
+ * subtitles are set to Off), the others listed in Tracks. */
+void side_subs_apply()
+{
+    std::vector<std::string> uris;
+    {
+        std::lock_guard<std::mutex> g(side.lock);
+        if (!side.ready || side.path != current_path)
+            return;
+        side.ready = false;
+        uris = side.uris;
+    }
+    /* A media from a listing opened again still has the ones that loaded
+     * last time (VLC keeps them on the item): not twice. */
+    std::vector<std::string> have;
+    if (libvlc_media_t *m = libvlc_media_player_get_media(mp)) {
+        libvlc_media_slave_t **slaves = nullptr;
+        unsigned n = libvlc_media_slaves_get(m, &slaves);
+        for (unsigned i = 0; i < n; i++)
+            if (slaves[i]->psz_uri)
+                have.push_back(slaves[i]->psz_uri);
+        libvlc_media_slaves_release(slaves, n);
+        libvlc_media_release(m);
+    }
+    bool on = player_sub_language() != "off";
+    for (size_t i = 0; i < uris.size(); i++) {
+        if (std::find(have.begin(), have.end(), uris[i]) != have.end()) {
+            fprintf(stderr, "player: subtitle beside the video %s: already there\n", uris[i].c_str());
+            continue;
+        }
+        int r = libvlc_media_player_add_slave(mp, libvlc_media_slave_type_subtitle, uris[i].c_str(), on && i == 0);
+        fprintf(stderr, "player: subtitle beside the video %s: %s\n", uris[i].c_str(), r == 0 ? "added" : "failed");
+    }
+}
+
+bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms,
+                       const std::vector<std::string> &options)
+{
+    /* A reopen of the same file (Auto's, Watch again) keeps its login. */
+    if (!options.empty() || path != current_path)
+        source_options = options;
+    {
+        std::lock_guard<std::mutex> g(side.lock);
+        side.serial++;
+        side.ready = false;
+    }
+    bool url = path.find("://") != std::string::npos;
+    std::string local = path;
+    if (url_scheme_is(path, "file")) {
+        char *p = vlc_uri2path(path.c_str());
+        local = p ? p : "";
+        free(p);
+        url = false;
+    }
+    if (url) {
+        side_subs_find(path, side.serial);
+    } else if (!local.empty()) {
+        std::vector<std::string> subs = local_side_subs(local);
+        bool on = player_sub_language() != "off";
+        std::string hint = sub_lang_hint();
+        for (size_t i = 0; i < subs.size(); i++) {
+            /* 4 (the user's): VLC turns the first one on; 3: only listed */
+            libvlc_media_slaves_add(m, libvlc_media_slave_type_subtitle, on && i == 0 ? 4 : 3,
+                                    file_uri(sub_ready(subs[i], hint)).c_str());
+            fprintf(stderr, "player: subtitle beside the video: %s\n", subs[i].c_str());
+        }
+    }
     if (path != kept.path) {
         /* another file: upright, no delays, its own tracks */
         picture.rotate = 0;
@@ -1098,11 +1444,11 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
         kept = { path, 0, 0, -2, -2, {} };
     } else {
         /* the same one again: what was set comes back once it plays */
-        /* (VLC finds the ones beside the video, named like it, by itself) */
+        /* (the ones beside the video, named like it, are found again) */
         std::string base = path.substr(0, path.rfind('.'));
         for (const std::string &sub : kept.subs)
             if (sub_attach_all || sub.compare(0, base.size(), base) != 0)
-                libvlc_media_slaves_add(m, libvlc_media_slave_type_subtitle, 4, file_uri(sub).c_str());
+                libvlc_media_slaves_add(m, libvlc_media_slave_type_subtitle, 4, sub_uri(sub).c_str());
         if (kept.audio != -2)
             restore_audio = kept.audio;
         if (kept.spu != -2)
@@ -1121,6 +1467,8 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
      * (PS5 recordings, streaming encodes) at 60 fps, that hidden work froze the
      * picture after every jump on the console. */
     libvlc_media_add_option(m, ":input-fast-seek");
+    /* A Blu-ray checks the player's region (VLC's default is B, Europe): ours. */
+    libvlc_media_add_option(m, (":bluray-region=" + player_bluray_region()).c_str());
     std::string alang = player_audio_language(), slang = player_sub_language();
     if (!alang.empty())
         libvlc_media_add_option(m, (":audio-language=" + alang).c_str());
@@ -1128,6 +1476,7 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
         libvlc_media_add_option(m, (":sub-language=" + (slang == "off" ? std::string("none") : slang)).c_str());
     chapters_cache.clear();
     chapters_tried = 0;
+    chapters_title = -2;
     fast_now = decode_mode == DECODE_FAST || (decode_mode == DECODE_AUTO && path == fast_path);
     if (fast_now) {
         libvlc_media_add_option(m, ":avcodec-skiploopfilter=4");
@@ -1169,12 +1518,36 @@ bool player_fast_decoding()
     return fast_now;
 }
 
+bool add_ready_subtitle(const std::string &path, const std::string &ready);
+
+/* The file playing is a disc: an image (.iso, .img), dvd:// or bluray://, or
+ * anything VLC sees several titles in (a VIDEO_TS / BDMV folder). */
+bool playing_disc_now()
+{
+    std::string bare = lowered(current_path.substr(0, current_path.find('?')));
+    if (bare.size() > 4 && (!bare.compare(bare.size() - 4, 4, ".iso") || !bare.compare(bare.size() - 4, 4, ".img")))
+        return true;
+    if (url_scheme_is(bare, "dvd") || url_scheme_is(bare, "bluray"))
+        return true;
+    return mp && libvlc_media_player_get_title_count(mp) > 1;
+}
+
 PlayerEvent player_tick()
 {
     double t = plat_time();
+    std::vector<PendingSub> done;
+    {
+        std::lock_guard<std::mutex> g(pending_lock);
+        done.swap(pending_subs);
+    }
+    for (const PendingSub &p : done)
+        if (mp && p.serial == side.serial)
+            add_ready_subtitle(p.path, p.ready);
     if (!mp || t < health.next)
         return PLAYER_EVENT_NONE;
     health.next = t + 1;
+    if (state() == libvlc_Playing)
+        side_subs_apply();
     if (sub_check_at > 0 && t >= sub_check_at && state() == libvlc_Playing) {
         sub_check_at = 0;
         size_t now_count = player_subtitle_tracks().size();
@@ -1231,6 +1604,11 @@ PlayerEvent player_tick()
     /* Struggling: most pictures of a second lost, or far fewer shown than the
      * file has. Not while paused, fast-forwarding or with no video at all. */
     bool playing = state() == libvlc_Playing && libvlc_media_player_get_rate(mp) <= 1.01f;
+    /* Not on a disc: its menus and still screens show few pictures by design
+     * (a Blu-ray menu looked like "can't keep up" every second), and Auto's
+     * reopen would throw the menus away. */
+    if (playing_disc_now())
+        playing = false;
     bool bad = playing && decoded > 0 &&
                (lost > shown || shown < fps * 0.5f);
     health.bad_seconds = bad ? health.bad_seconds + 1 : 0;
@@ -1310,6 +1688,86 @@ void player_navigate(int action)
         libvlc_media_player_navigate(mp, modes[action]);
 }
 
+/* libvlc's own (lib/media_player_internal.h): the input, held. */
+extern "C" input_thread_t *libvlc_get_input_thread(libvlc_media_player_t *);
+
+bool player_in_menu()
+{
+    /* Read four times a second: the title list is copied out on every call. */
+    static double next;
+    static bool menu;
+    double now = plat_time();
+    if (now < next)
+        return menu;
+    next = now + 0.25;
+    menu = false;
+    if (!mp)
+        return menu;
+    /* A DVD says when menu buttons are on screen ("highlight", set by VLC's
+     * dvdnav). A DVD's intro or warning screen is in its menu part too but has
+     * no buttons: there ✕ must pause, not press a button nobody sees. */
+    if (input_thread_t *input = libvlc_get_input_thread(mp)) {
+        vlc_object_t *in = (vlc_object_t *)input; /* input_thread_t is opaque here */
+        /* A Blu-ray says when its menu is on screen, in any title
+         * (patches/0010); the "Top Menu" title alone missed most discs. Asked
+         * first: VLC's subtitle unit puts a "highlight" on every input with
+         * a video output, so that one alone doesn't mean a DVD. */
+        bool bd = var_Type(in, "bluray-menu-open") != 0;
+        bool dvd = !bd && var_Type(in, "highlight") != 0;
+        if (dvd)
+            menu = var_GetBool(in, "highlight");
+        else if (bd)
+            menu = var_GetBool(in, "bluray-menu-open");
+        vlc_object_release(in);
+        static int logged = -1;
+        if ((dvd || bd) && logged != (int)menu) {
+            logged = menu;
+            fprintf(stderr, "player: %s menu %s\n", dvd ? "DVD" : "Blu-ray", menu ? "on screen" : "gone");
+        }
+        if (dvd || bd)
+            return menu;
+    }
+    /* A Blu-ray played without menus: its menu titles. */
+    int cur = libvlc_media_player_get_title(mp);
+    libvlc_title_description_t **titles = nullptr;
+    int n = libvlc_media_player_get_full_title_descriptions(mp, &titles);
+    if (n > 0 && cur >= 0 && cur < n && titles[cur])
+        /* menu only: a Blu-ray marks its movie "interactive" too (pop-up
+         * menus), and ✕ must still pause that */
+        menu = (titles[cur]->i_flags & libvlc_title_menu) != 0;
+    if (n > 0)
+        libvlc_title_descriptions_release(titles, (unsigned)n);
+    return menu;
+}
+
+/* The disc's main menu (a DVD's root menu, a Blu-ray's Top Menu) or a
+ * Blu-ray's pop-up menu, over the film. */
+void player_disc_menu(bool popup)
+{
+    if (!mp)
+        return;
+    if (input_thread_t *input = libvlc_get_input_thread(mp)) {
+        vlc_object_t *in = (vlc_object_t *)input;
+        const char *var = popup ? "menu-popup" : "menu-title";
+        if (var_Type(in, var) != 0)
+            var_TriggerCallback(in, var);
+        fprintf(stderr, "player: disc %s\n", popup ? "pop-up menu" : "menu");
+        vlc_object_release(in);
+    }
+}
+
+bool player_disc_has_popup()
+{
+    bool popup = false;
+    if (mp)
+        if (input_thread_t *input = libvlc_get_input_thread(mp)) {
+            vlc_object_t *in = (vlc_object_t *)input;
+            popup = var_Type(in, "bluray-popup") != 0 && var_GetBool(in, "bluray-popup");
+            vlc_object_release(in);
+        }
+    return popup;
+}
+
 bool player_paused()
 {
     if (live_paused)
@@ -1350,7 +1808,14 @@ void player_toggle_pause()
         return;
     }
     bool want = !player_paused();
+    fprintf(stderr, "player: %s\n", want ? "pause" : "play");
     libvlc_media_player_set_pause(mp, want ? 1 : 0);
+    if (!want) {
+        /* the second that plays on from a pause starts slowly: not a
+         * "can't keep up" (the count starts again after it) */
+        health.primed = false;
+        health.next = plat_time() + 2;
+    }
     pause_wanted = want ? 1 : 0;
     pause_wanted_at = plat_time();
     std::lock_guard<std::mutex> g(audio_lock);
@@ -1480,16 +1945,57 @@ std::string file_uri(const std::string &path)
     return uri;
 }
 
+bool player_is_subtitle_name(const std::string &name)
+{
+    return is_sub_name(lowered(name));
+}
+
 bool player_add_subtitle(const std::string &path)
 {
     if (!mp)
         return false;
+    /* A full path or an address only: VLC makes a relative one full with
+     * getcwd(), which crashed on the console. */
+    if (path.empty() || (path[0] != '/' && path.find("://") == std::string::npos)) {
+        fprintf(stderr, "player: not a subtitle file address: \"%s\"\n", path.c_str());
+        return false;
+    }
+    if (path.find("://") != std::string::npos) {
+        /* On a share or a link: read (and made UTF-8) in the background, put
+         * in by player_tick; read here, the picture froze ~0.6 s. */
+        int serial = side.serial;
+        std::string hint = sub_lang_hint();
+        libvlc_instance_t *inst = vlc;
+        libvlc_retain(inst);
+        std::thread([=]() {
+            std::string ready = sub_ready(path, hint);
+            libvlc_release(inst);
+            std::lock_guard<std::mutex> g(pending_lock);
+            pending_subs.push_back({ path, ready, serial });
+        }).detach();
+        return true;
+    }
+    /* not UTF-8: a converted copy */
+    return add_ready_subtitle(path, sub_ready(path, sub_lang_hint()));
+}
+
+/* A subtitle file read and made ready: into the file playing. */
+bool add_ready_subtitle(const std::string &path, const std::string &ready)
+{
+    if (ready.empty()) {
+        fprintf(stderr, "player: subtitle file %s: can't be read\n", path.c_str());
+        return false;
+    }
     sub_check_count = player_subtitle_tracks().size();
     sub_check_at = plat_time() + 4;
-    int r = libvlc_media_player_add_slave(mp, libvlc_media_slave_type_subtitle, file_uri(path).c_str(), true);
+    int r = libvlc_media_player_add_slave(mp, libvlc_media_slave_type_subtitle, sub_uri(ready).c_str(), true);
     fprintf(stderr, "player: subtitle file %s: %s\n", path.c_str(), r == 0 ? "added" : "failed");
-    if (r == 0 && std::find(kept.subs.begin(), kept.subs.end(), path) == kept.subs.end())
-        kept.subs.push_back(path);
+    /* the file VLC got is the one a reopen attaches again */
+    if (r == 0 && std::find(kept.subs.begin(), kept.subs.end(), ready) == kept.subs.end())
+        kept.subs.push_back(ready);
+    /* VLC jumps to put the new track in step: not a "can't keep up" second */
+    health.primed = false;
+    health.next = plat_time() + 3;
     return r == 0;
 }
 
@@ -1616,10 +2122,11 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
         p.view[2] = tanf(view_fov * 3.14159265f / 360);
         p.view[3] = h > 0 ? w / h : 16.0f / 9;
     }
-    uint32_t vis_w = v.width && v.width <= planes.buf_w ? v.width : planes.buf_w;
-    vis_h = v.height && v.height <= planes.buf_h ? v.height : planes.buf_h;
-    p.uv_scale[0] = (float)vis_w / planes.buf_w;
-    p.uv_scale[1] = (float)vis_h / planes.buf_h;
+    /* The whole buffer is picture: vmem's pictures fill the size it set up
+     * (1024x560 arrives stretched to 1024x578), so nothing is cut; the
+     * rectangle has the picture's real shape. */
+    p.uv_scale[0] = 1;
+    p.uv_scale[1] = 1;
     VkViewport vp = { x, y, w, h, 0, 1 };
     /* The scissor stays on screen ("Fill" makes the rectangle larger than it). */
     float sx0 = x < 0 ? 0 : x, sy0 = y < 0 ? 0 : y;
@@ -1667,12 +2174,36 @@ void player_set_subtitle_delay(int64_t ms)
     kept.spu_delay = ms;
 }
 
+/* The title is a disc menu (a DVD's "DVD Menu" lists Resume, Root, Title...
+ * as chapters: not chapters of anything). */
+static bool title_is_menu(int title)
+{
+    libvlc_title_description_t **titles = nullptr;
+    int n = libvlc_media_player_get_full_title_descriptions(mp, &titles);
+    bool menu = n > 0 && title >= 0 && title < n && titles[title] && (titles[title]->i_flags & libvlc_title_menu);
+    if (n > 0)
+        libvlc_title_descriptions_release(titles, (unsigned)n);
+    return menu;
+}
+
 std::vector<Chapter> player_chapters()
 {
+    if (!mp)
+        return chapters_cache;
+    /* A disc moves between titles (menu, intro, the film): each has its own
+     * chapters, so the list is read again when the title changes. */
+    int title = libvlc_media_player_get_title(mp);
+    if (title != chapters_title) {
+        chapters_cache.clear();
+        chapters_tried = 0;
+        chapters_title = title;
+    }
     /* Known once the file is open; asked again at most once a second until then. */
-    if (!mp || !chapters_cache.empty() || plat_time() < chapters_tried + 1)
+    if (!chapters_cache.empty() || plat_time() < chapters_tried + 1)
         return chapters_cache;
     chapters_tried = plat_time();
+    if (title_is_menu(title))
+        return chapters_cache;
     libvlc_chapter_description_t **d = nullptr;
     int n = libvlc_media_player_get_full_chapter_descriptions(mp, -1, &d);
     for (int i = 0; i < n; i++) {
@@ -1716,8 +2247,9 @@ bool player_screenshot(const std::string &path)
         shot.f = format;
         shot.data.assign(slots[last_slot].mapped, slots[last_slot].mapped + format.size);
     }
-    shot.w = info.width && info.width <= shot.f.width ? info.width : shot.f.width;
-    shot.h = info.height && info.height <= shot.f.height ? info.height : shot.f.height;
+    /* the whole buffer: the picture fills it (see video_draw) */
+    shot.w = shot.f.width;
+    shot.h = shot.f.height;
     shot.path = path;
     std::thread(shot_main, std::move(shot)).detach();
     return true;
@@ -1780,6 +2312,27 @@ void player_set_sub_style(const SubStyle &s)
     pref_set("sub_box", s.box ? 1 : 0);
     if (mp)
         apply_sub_style(s);
+}
+
+/* A, B or C: the saved choice, else the region of the interface's language
+ * (A: the Americas, Japan, Korea, South-East Asia, Taiwan; B: Europe, the
+ * Middle East, Africa, Oceania; C: China, Russia, India). */
+std::string player_bluray_region()
+{
+    std::string r = pref_str("bd_region", "");
+    if (r == "A" || r == "B" || r == "C")
+        return r;
+    std::string code = lang_code(lang_current());
+    if (code == "zh-CN" || code == "ru")
+        return "C";
+    if (code == "en" || code == "es" || code == "pt-BR" || code == "ja" || code == "ko" || code == "zh-TW" || code == "id")
+        return "A";
+    return "B";
+}
+
+void player_set_bluray_region(const std::string &region)
+{
+    pref_set("bd_region", region);
 }
 
 std::string player_audio_language()

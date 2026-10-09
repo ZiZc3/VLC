@@ -1,0 +1,35 @@
+--- a/modules/access/bluray.c	2026-10-09 16:18:09.281680898 +0000
++++ b/modules/access/bluray.c	2026-10-09 16:18:09.281979298 +0000
+@@ -807,6 +807,11 @@
+     var_SetBool( p_demux, "ts-pcr-offsetfix", false );
+ 
+     var_AddCallback( p_demux->p_input, "intf-event", onIntfEvent, p_demux );
++    /* VLC-PS5: whether a menu (HDMV IG or pop-up) is on screen, and whether
++     * the film has a pop-up menu, for the app: the d-pad presses its buttons
++     * only then (a menu can show in any title, not only "Top Menu"). */
++    var_Create( p_demux->p_input, "bluray-menu-open", VLC_VAR_BOOL );
++    var_Create( p_demux->p_input, "bluray-popup", VLC_VAR_BOOL );
+ 
+     /* Open BluRay */
+ #ifdef BLURAY_DEMUX
+@@ -1012,6 +1017,8 @@
+     demux_sys_t *p_sys = p_demux->p_sys;
+ 
+     var_DelCallback( p_demux->p_input, "intf-event", onIntfEvent, p_demux );
++    var_Destroy( p_demux->p_input, "bluray-menu-open" );
++    var_Destroy( p_demux->p_input, "bluray-popup" );
+ 
+     setTitleInfo(p_sys, NULL);
+ 
+@@ -2809,9 +2816,11 @@
+ #endif
+     case BD_EVENT_MENU:
+         p_sys->b_menu_open = e->param;
++        var_SetBool( p_demux->p_input, "bluray-menu-open", e->param != 0 );
+         break;
+     case BD_EVENT_POPUP:
+         p_sys->b_popup_available = e->param;
++        var_SetBool( p_demux->p_input, "bluray-popup", e->param != 0 );
+         /* TODO: show / hide pop-up menu button in gui ? */
+         break;
+ 
