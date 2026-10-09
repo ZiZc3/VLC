@@ -2,7 +2,7 @@
   <img src="assets/vlc-logo.png" alt="VLC" width="140">
 </p>
 
-<h1 align="center">VLC for PS5</h1>
+<h1 align="center">VLC</h1>
 
 <p align="center">
   <b>VLC media player, running natively on PlayStation 5.</b><br>
@@ -22,12 +22,12 @@
 ## Features
 
 - Plays nearly anything VLC plays: H.264, HEVC (8 and 10-bit), AV1, VP9, VC-1, MPEG-2 and more, up to 4K, with every common audio format, including TrueHD and DTS-HD.
-- **Library** with Home, Videos, Music, Playlists and Browse: thumbnails, Continue watching, Favourites and search.
+- **Library** with Home, Videos, Music and Browse: thumbnails, Continue watching, Favourites and search.
 - **Playlists**: make your own, add any video or song from anywhere with Options, reorder them; covers made from their videos; `.m3u` files on your drives play too.
 - **Subtitles** in every script, styled ASS/SSA, size and colour, delay, plus **OpenSubtitles** downloads.
 - **5.1 / 7.1 surround**, equalizer, night mode and audio delay.
 - **Network**: SMB shares, DLNA servers, network links (HTTP, HLS, DASH…), free TV channels and internet radio.
-- **Phone & PC page**: open `http://<ps5-ip>:8080` in any browser to send files to the PS5, download them back to your phone or PC, delete them, or add your OpenSubtitles key.
+- **PC/Phone page**: open `http://<ps5-ip>:8080` to send files to the PS5, use your pc or phone as a remote.
 - Music mode with covers and a visualizer, a photo viewer, DVD / Blu-ray folders, and ZIP / RAR / 7z archives.
 - Two looks (**Classic** and **Modern**) and **16 languages**.
 
@@ -39,9 +39,9 @@ Download the [latest release](../../releases/latest), then:
 
 1. Copy the **`PPSA85300`** folder to `/data/homebrew/`.
 2. Start **VLC** from the home screen.
-3. Add your media: a USB drive, `/data/vlc/`, or send files from your phone or PC (Options › Send files from a phone or PC).
+3. Add your media: a USB drive, `/data/vlc/`, or send files from your pc/phone (Options › Send files from a phone).
 
-**Optional full access.** With etaHEN, the Lapy JB daemon or the [Helper](https://github.com/ZiZc3/Ruffle-Flash-PS5), VLC can lift its sandbox. This gives it all of `/data` and USB drives plugged in while it runs. For the Helper, add `PPSA85300` to `/data/whitelist.txt`. Without any of these, VLC still works.
+Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
 
 ## Controls
 
@@ -57,7 +57,7 @@ Download the [latest release](../../releases/latest), then:
 | L1 / R1 | Switch tabs |
 | L2 / R2 | Jump A–Z |
 | R3 | Search |
-| Options | Settings, search, network link, send files… |
+| Options | Settings, search, network link, phone… |
 
 **Player**
 
@@ -77,14 +77,14 @@ Download the [latest release](../../releases/latest), then:
 
 | Path | What |
 |---|---|
-| `/data/homebrew/PPSA85300/media/` | The app's own media folder (Screenshots go here) |
+| `/data/homebrew/PPSA85300/media/` | The app's own media folder |
 | `/data/vlc/` | Your media on the console (needs full access) |
 | `/mnt/usb0` … `/mnt/usb7`, `/mnt/ext0` | USB and extended storage |
 | `/data/homebrew/PPSA85300/vlc-ps5.log` | Log of the last session (attach it when reporting a problem) |
 
-## Roadmap
+## All VLC Features
 
-✅ In the app · 🔜 Next update · 🗓️ Planned · ❌ Not possible yet
+✅ In the app.
 
 ### 🎞️ Video
 
@@ -102,10 +102,9 @@ Download the [latest release](../../releases/latest), then:
 | 360° videos (look around with the right stick) | ✅ |
 | Frame-by-frame step | ✅ |
 | Screenshots to PNG | ✅ |
-| Hardware decoding (H.264 / HEVC / VP9 up to 4K) | 🔜 |
-| HDR → SDR tone mapping | 🔜 |
-| HDR10 output to the TV | 🗓️ |
-| Upscaling for sub-4K video | 🗓️ |
+| Hardware decoding (H.264 / HEVC / VP9 up to 4K) | Not yet |
+| HDR → SDR tone mapping | Not yet |
+| HDR10 output to the TV | Not yet |
 
 ### 🔊 Audio
 
@@ -126,11 +125,10 @@ Download the [latest release](../../releases/latest), then:
 | Feature | Status |
 |---|---|
 | SRT, ASS/SSA, embedded MKV/MP4, PGS, DVB, DVD, closed captions | ✅ |
-| Every script: Arabic (Noto Naskh Arabic), Hebrew, Cyrillic, CJK, Thai, Devanagari… | ✅ |
+| Every script: Arabic, Hebrew, Cyrillic, CJK, Thai, Devanagari… | ✅ |
 | Styled ASS/SSA (libass: fonts, positions, karaoke) | ✅ |
-| Auto-load `movie.srt` next to the video (USB, network shares, links, `Subs` folders) | ✅ |
-| Add any subtitle file while playing (from a drive or a share) | ✅ |
-| Older subtitle encodings (GBK, Big5, Shift JIS, Windows-1252/1251/1256…) | ✅ |
+| Auto-load `movie.srt` next to the video | ✅ |
+| Add a subtitle file while playing | ✅ |
 | Subtitle delay | ✅ |
 | Size, colour, background box | ✅ |
 | Preferred subtitle language | ✅ |
@@ -143,24 +141,21 @@ Download the [latest release](../../releases/latest), then:
 | Resume and Continue watching | ✅ |
 | Seek preview while scrubbing | ✅ |
 | Speed 0.25× – 4× | ✅ |
+| Playlists | ✅ |
 | Chapters (list, skip, marks on the seek bar) | ✅ |
 | Bookmarks inside a file | ✅ |
 | A–B repeat | ✅ |
 | Loop, repeat list, shuffle | ✅ |
-| Create, rename and reorder playlists (Playlists tab) | ✅ |
-| Playlist covers from their first videos (2×2 mosaic) | ✅ |
-| Add to playlist from anywhere (Options) | ✅ |
-| Playlists found on drives (.m3u, .m3u8, .pls) | ✅ |
+| Playlists (.m3u, .m3u8, .pls) | ✅ |
 | Up next with countdown, Watch again | ✅ |
 | Sleep timer | ✅ |
 | Touchpad swipes (seek, volume) | ✅ |
-| On-screen performance overlay | 🗓️ |
 
 ### 📚 Library & interface
 
 | Feature | Status |
 |---|---|
-| Home, Videos, Music, Playlists, Browse tabs with thumbnails | ✅ |
+| Home, Videos, Music, Browse tabs with thumbnails | ✅ |
 | Classic and Modern looks | ✅ |
 | Colour themes (Modern) + custom theme file | ✅ |
 | 16 languages (follows the console's language) | ✅ |
@@ -169,39 +164,30 @@ Download the [latest release](../../releases/latest), then:
 | Search with on-screen keyboard | ✅ |
 | A–Z jump in long lists | ✅ |
 | File details (codec, resolution, bitrate…) | ✅ |
-| Browse shows every file (what VLC can't play says so) | ✅ |
 | Delete files and folders | ✅ |
 | USB drives detected while running | ✅ |
 | Music mode: covers, artist / album, plays behind the menus | ✅ |
 | Audio visualizer | ✅ |
 | Photo viewer with slideshow | ✅ |
 | Text / .nfo viewer | ✅ |
-| Phone & PC page in every language | 🗓️ |
 
 ### 🌐 Network
 
 | Feature | Status |
 |---|---|
-| Phone & PC page: send files over Wi-Fi | ✅ |
-| Phone & PC page: download files from the PS5 to your phone or PC | ✅ |
-| Phone & PC page: delete files on the PS5 | ✅ |
-| Phone & PC page: add your OpenSubtitles key | ✅ |
+| PC/Phone page: send files over Wi-Fi | ✅ |
 | SMB shares (Windows, NAS) with login | ✅ |
 | DLNA / UPnP media servers | ✅ |
 | Network links: HTTP, HTTPS, HLS, DASH, UDP, RTP, FTP | ✅ |
 | Free TV channels (iptv-org) | ✅ |
 | Internet radio (radio-browser) | ✅ |
-| TV guide (EPG) for channels | 🗓️ |
-| Podcast feeds | 🗓️ |
 
 ### 💿 Discs & files
 
 | Feature | Status |
 |---|---|
 | DVD folders and ISOs with menus | ✅ |
-| Blu-ray folders and ISOs (unprotected) with HDMV menus | ✅ |
-| Blu-ray Java (BD-J) menus | ❌ needs Java, which the PS5 hasn't got: those discs play without menus |
-| Blu-ray region setting (A / B / C) | ✅ |
+| Blu-ray folders and ISOs (unprotected) | ✅ |
 | ZIP, RAR and 7z archives open like folders | ✅ |
 
 ## Building
@@ -233,4 +219,3 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 
 VLC for PS5 is licensed under the **GNU General Public License v3.0** (see [`LICENSE`](LICENSE)).
 VLC itself is GPL-2.0-or-later / LGPL-2.1-or-later. The bundled libraries and fonts keep their own licenses.
-No media is included. VLC for PS5 is a fan project, not affiliated with Sony or VideoLAN. VLC and the cone logo are trademarks of VideoLAN.
