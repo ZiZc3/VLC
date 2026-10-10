@@ -43,12 +43,16 @@ wav
 flacsys
 subtitle
 vobsub
+# Ogg container demux (.ogg/.oga/.opus): also what VLC's opus module links against
+ogg
 avformat
 idummy
 
 # decoders
 avcodec
 dav1d
+# Opus: FFmpeg 8 has no native Opus decoder, so VLC's own module (libopus) does it
+opus
 araw
 lpcm
 adpcm

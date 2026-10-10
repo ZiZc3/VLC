@@ -200,7 +200,7 @@ mkdir -p ~/ps5/vlc-ps5/src && cd ~/ps5/vlc-ps5/src
 curl -LO https://download.videolan.org/pub/videolan/vlc/3.0.24/vlc-3.0.24.tar.xz
 tar xf vlc-3.0.24.tar.xz && cd -               # back to this repository
 
-TARGET=ps5 bash ps5/deps/build-deps.sh     # the libraries (FFmpeg, GnuTLS, libass…)
+TARGET=ps5 bash ps5/deps/build-deps.sh     # the libraries (FFmpeg, Opus, GnuTLS, libass…)
 TARGET=ps5 bash ps5/configure-vlc.sh       # libvlc 3.0.24 with every plugin linked in
 bash ps5/build-title.sh                    # dist/PPSA85300/ with a signed eboot.bin
 ```

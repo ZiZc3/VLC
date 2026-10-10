@@ -105,6 +105,26 @@ build_zlib() {
         make -j"$jobs" libz.a && make install)
 }
 
+# Ogg container: VLC's opus module (and its ogg demux) check for ogg >= 1.0.
+build_ogg() {
+    local v=1.3.6
+    fetch "https://downloads.xiph.org/releases/ogg/libogg-$v.tar.xz"
+    unpack "libogg-$v.tar.xz" "libogg-$v"
+    (cd "$src/libogg-$v" && ./configure --prefix="$prefix" --libdir="$prefix/lib"         ${host_triple:+--host=$host_triple --build=x86_64-pc-linux-gnu}         --enable-static --disable-shared --with-pic &&
+        make -j"$jobs" && make install)
+}
+
+# Opus audio (issue #7): VLC's own opus module (modules/codec/opus.c) decodes it.
+# FFmpeg 8 dropped its native Opus decoder, and its libopus wrapper needs this
+# library too, so there is no Opus decoder without it.
+build_opus() {
+    local v=1.6.1
+    fetch "https://downloads.xiph.org/releases/opus/opus-$v.tar.gz"
+    unpack "opus-$v.tar.gz" "opus-$v"
+    (cd "$src/opus-$v" && ./configure --prefix="$prefix" --libdir="$prefix/lib"         ${host_triple:+--host=$host_triple --build=x86_64-pc-linux-gnu}         --enable-static --disable-shared --with-pic --disable-doc --disable-extra-programs &&
+        make -j"$jobs" && make install)
+}
+
 build_ffmpeg() {
     local v=8.1.2
     fetch "https://ffmpeg.org/releases/ffmpeg-$v.tar.xz"
@@ -116,14 +136,18 @@ build_ffmpeg() {
         patch -d "$src/ffmpeg-$v" -p1 -s < "$p"
     done
     # Decoders, demuxers, parsers and swscale only. No autodetect: nothing from the system.
+    # --extra-libs=-lm: pkg-config --exists (FFmpeg's libopus check) doesn't add
+    # opus.pc's Libs.private (-lm), so its sqrtf references fail the link test.
+    # On the PS5 -lm resolves to the empty stub libm.a from build_compat.
     (cd "$src/ffmpeg-$v" && ./configure --prefix="$prefix" \
         --enable-static --disable-shared --enable-pic --disable-autodetect \
         --disable-programs --disable-doc --disable-debug \
         --disable-avdevice --disable-devices --disable-avfilter --disable-filters \
         --disable-network --disable-iconv --disable-bzlib --disable-lzma \
         --disable-encoders --disable-muxers --disable-hwaccels \
-        --enable-zlib \
+        --enable-zlib --enable-libopus \
         --extra-cflags="-I$prefix/include" --extra-ldflags="-L$prefix/lib" \
+        --extra-libs=-lm \
         ${ffmpeg_cross:-} &&
         make -j"$jobs" && make install)
 }
@@ -346,7 +370,15 @@ build_bluray() {
         -Dbdj_jar=disabled -Denable_docs=false
     ninja -C "$src/build-bluray-$target" install
     # Its gc_free (graphics controller) clashes with Mesa's (RADV) in the title.
-    llvm-objcopy-18 --redefine-sym gc_free=bluray_gc_free "$prefix/lib/libbluray.a"
+    # GNU objcopy does the same rename; only the clash's absence on host makes this
+    # skippable there (the title still links Mesa, so the PS5 must rename it).
+    local objcopy
+    objcopy=$(command -v llvm-objcopy-18 || command -v llvm-objcopy || command -v objcopy) || {
+        [[ $target == host ]] || { echo "no objcopy for gc_free rename" >&2; exit 1; }
+        echo "no objcopy found; skipping gc_free rename (host only)" >&2
+        return 0
+    }
+    "$objcopy" --redefine-sym gc_free=bluray_gc_free "$prefix/lib/libbluray.a"
 }
 
 # ZIP / RAR / 7z (extras): libarchive for VLC's archive module, reading only.
@@ -365,7 +397,7 @@ build_libarchive() {
     cmake --build "$src/build-libarchive-$target" && cmake --install "$src/build-libarchive-$target"
 }
 
-all=(nasm compat zlib ffmpeg dav1d ebml matroska dvbpsi freetype fribidi harfbuzz gmp nettle gnutls smb2 upnp libxml2 ass dvdread dvdnav bluray libarchive)
+all=(nasm compat zlib ogg opus ffmpeg dav1d ebml matroska dvbpsi freetype fribidi harfbuzz gmp nettle gnutls smb2 upnp libxml2 ass dvdread dvdnav bluray libarchive)
 recipes=("$@")
 [[ ${#recipes[@]} -gt 0 ]] || recipes=("${all[@]}")
 for r in "${recipes[@]}"; do

@@ -62,8 +62,8 @@ off=(
     live555 smbclient dsm sftp nfs v4l2 vcd
     libcddb screen vnc freerdp srt librist decklink linsys dc1394 dv1394 libgcrypt
     # demux / codecs covered by FFmpeg, or not wanted yet
-    gme sid ogg shout mod mpc mad mpg123 faad aom vpx a52 dca flac libmpeg2
-    vorbis tremor speex opus theora oggspots kate tiger png jpeg bpg x262 x264 x26410b
+    gme sid shout mod mpc mad mpg123 faad aom vpx a52 dca flac libmpeg2
+    vorbis tremor speex theora oggspots kate tiger png jpeg bpg x262 x264 x26410b
     x265 fluidsynth fluidlite zvbi aribsub aribb25 spatialaudio postproc libva crystalhd
     shine twolame fdkaac taglib chromaprint chromecast
     # video / audio outputs and visualisations (the app draws and plays itself)
@@ -80,7 +80,7 @@ cd "$build"
 "$vlc/configure" "${cross[@]}" --prefix="$prefix" \
     --enable-static --disable-shared --disable-rpath \
     --enable-avcodec --enable-avformat --enable-swscale --enable-dav1d \
-    --enable-matroska --enable-gnutls --enable-smb2 --enable-upnp --enable-libxml2 --enable-libass --enable-dvdread --enable-dvdnav --enable-bluray --enable-archive --enable-freetype --enable-fribidi --enable-harfbuzz --enable-dvbpsi \
+    --enable-matroska --enable-gnutls --enable-smb2 --enable-upnp --enable-libxml2 --enable-libass --enable-dvdread --enable-dvdnav --enable-bluray --enable-archive --enable-freetype --enable-fribidi --enable-harfbuzz --enable-dvbpsi --enable-opus --enable-ogg \
     CFLAGS="$cflags -I$prefix/include" CXXFLAGS="$cflags -I$prefix/include" \
     LDFLAGS="-L$prefix/lib" \
     "${args[@]}"
