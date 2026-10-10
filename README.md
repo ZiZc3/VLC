@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.3-f37a2b">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.4-f37a2b">
   <img alt="Platform" src="https://img.shields.io/badge/platform-PS5-1f1f1f">
   <img alt="VLC" src="https://img.shields.io/badge/libvlc-3.0.24-ff8800">
   <img alt="Renderer" src="https://img.shields.io/badge/renderer-Vulkan%20(RADV)-c0561b">
