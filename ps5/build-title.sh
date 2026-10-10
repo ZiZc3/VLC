@@ -57,7 +57,7 @@ for f in imgui imgui_draw imgui_tables imgui_widgets; do
 done
 cc "${cflags[@]}" "${cxxflags[@]}" -c "$repo/third_party/imgui/backends/imgui_impl_vulkan.cpp" \
     -o "$work/obj/imgui_impl_vulkan.o"
-for f in gfx image prefs player library network osub lang web ui main; do
+for f in gfx image prefs player subconv library network osub lang web ui main; do
     cc "${cflags[@]}" "${cxxflags[@]}" -c "$repo/src/$f.cc" -o "$work/obj/$f.o"
 done
 "$sdk/bin/prospero-ar" rcs "$work/libprobe.a" "$work"/obj/*.o
@@ -90,6 +90,8 @@ while read -r item; do
     esac
 done < "$static/link.rsp"
 vlc_inputs+=("$prefix/lib/libps5compat.a")
+# GNU libiconv: subtitle files that aren't UTF-8 (src/subconv.cc)
+vlc_inputs+=("$prefix/lib/libiconv.a")
 
 # 4. Link.
 # shellcheck source=/dev/null

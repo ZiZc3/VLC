@@ -2,16 +2,23 @@
     "ageLevel": {
         "default": 0
     },
-    "applicationCategoryType": 65536,
+    "applicationCategoryType": 0,
     "applicationDrmType": "free",
-    "attribute": 1644167168,
+    "attribute": 0,
     "attribute2": 0,
     "attribute3": 524352,
     "conceptId": "85300",
-    "contentBadgeType": 2,
+    "contentBadgeType": 1,
     "contentId": "UP9000-PPSA85300_00-VLCFORPS50000001",
     "contentVersion": "01.000.004",
     "downloadDataSize": 256,
+    "gameIntent": {
+        "permittedIntents": [
+            {
+                "intentType": "launchActivity"
+            }
+        ]
+    },
     "localizedParameters": {
         "defaultLanguage": "en-US",
         "en-US": {

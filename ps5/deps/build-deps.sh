@@ -281,6 +281,11 @@ build_upnp() {
     for p in libtool-nostdlib-workaround miniserver; do
         patch -d "$src/$d" -p1 -s < "$src/vlc-3.0.24/contrib/src/upnp/$p.patch"
     done
+    # Ours: discovery without the SSDP listener when port 1900 can't be had
+    # (sandboxed on the console: UPNP_E_SOCKET_BIND).
+    for p in "$(dirname "$(dirname "$here")")"/patches/upnp/*.patch; do
+        patch -d "$src/$d" -p1 -s < "$p"
+    done
     cmake -S "$src/$d" -B "$src/build-upnp-$target" -G Ninja ${cmake_cross:-} \
         -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DUPNP_BUILD_SHARED=OFF -DUPNP_BUILD_STATIC=ON \
@@ -320,6 +325,11 @@ build_dvdread() {
     local v=6.1.3
     fetch "https://download.videolan.org/pub/videolan/libdvdread/$v/libdvdread-$v.tar.bz2"
     unpack "libdvdread-$v.tar.bz2" "libdvdread-$v"
+    # VLC-PS5's own (patches/dvdread/): DVD images read from a stream (a network
+    # share) without libdvdcss, which the PS5 build doesn't have.
+    for p in "$(dirname "$(dirname "$here")")"/patches/dvdread/*.patch; do
+        patch -d "$src/libdvdread-$v" -p1 -s < "$p"
+    done
     (cd "$src/libdvdread-$v" && ./configure --prefix="$prefix" --libdir="$prefix/lib" \
         ${host_triple:+--host=$host_triple --build=x86_64-pc-linux-gnu} \
         --enable-static --disable-shared --with-pic --disable-apidoc &&
@@ -365,7 +375,21 @@ build_libarchive() {
     cmake --build "$src/build-libarchive-$target" && cmake --install "$src/build-libarchive-$target"
 }
 
-all=(nasm compat zlib ffmpeg dav1d ebml matroska dvbpsi freetype fribidi harfbuzz gmp nettle gnutls smb2 upnp libxml2 ass dvdread dvdnav bluray libarchive)
+# Character sets for subtitle files that aren't UTF-8 (Windows-1252, GBK,
+# Big5, Shift JIS, Windows-1256...): the console's libc has no iconv. The app
+# converts such a file to UTF-8 before VLC reads it (src/subconv.cc).
+build_iconv() {
+    local v=1.18
+    fetch "https://ftp.gnu.org/gnu/libiconv/libiconv-$v.tar.gz"
+    unpack "libiconv-$v.tar.gz" "libiconv-$v"
+    (cd "$src/libiconv-$v" && ./configure --prefix="$prefix" --libdir="$prefix/lib" \
+        ${host_triple:+--host=$host_triple --build=x86_64-pc-linux-gnu} \
+        --enable-static --disable-shared --disable-nls --with-pic &&
+        make lib/localcharset.h && make -j"$jobs" -C lib && make -C lib install &&
+        install -m 644 include/iconv.h.inst "$prefix/include/iconv.h")
+}
+
+all=(nasm compat zlib ffmpeg dav1d ebml matroska dvbpsi freetype fribidi harfbuzz gmp nettle gnutls smb2 upnp libxml2 ass dvdread dvdnav bluray libarchive iconv)
 recipes=("$@")
 [[ ${#recipes[@]} -gt 0 ]] || recipes=("${all[@]}")
 for r in "${recipes[@]}"; do

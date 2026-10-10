@@ -186,8 +186,14 @@ static int send_request(stream_t *access, uint64_t offset)
     int r = sceHttpSendRequest(sys->req, NULL, 0);
     vlc_interrupt_unregister();
     if (r < 0) {
-        PLOG("sending failed (%#x): VLC's own http is used from now on", (unsigned)r);
-        service_refused = true;
+        /* 0x8095xxxx: the console's SSL turned this one server down (its
+         * certificate, its ciphers). VLC's own http takes this link; the
+         * service stays for the others. Anything else: the service itself. */
+        bool ssl = ((unsigned)r & 0xFFFF0000u) == 0x80950000u;
+        PLOG("sending failed (%#x): %s", (unsigned)r,
+             ssl ? "SSL refused this server, VLC's own http takes this link" : "VLC's own http is used from now on");
+        if (!ssl)
+            service_refused = true;
         drop_request(sys);
         return VLC_EGENERIC;
     }
@@ -319,10 +325,16 @@ static int Open(vlc_object_t *obj)
     if (sys->redirect) {
         /* VLC opens the new address (and probes the modules again). */
         char *to = vlc_uri_resolve(access->psz_url, sys->redirect);
-        PLOG("redirected (%d) to %s", sys->status, to ? to : sys->redirect);
-        free(access->psz_url);
-        access->psz_url = to ? to : strdup(sys->redirect);
+        if (!to)
+            to = strdup(sys->redirect);
+        if (!to)
+            goto error;
+        PLOG("redirected (%d) to %s", sys->status, to);
+        /* Not freed here: access_New() keeps the old address (to spot a
+         * loop) and frees it itself. Freeing it too was a double free. */
+        access->psz_url = to;
         Close(obj);
+        access->p_sys = NULL;
         return VLC_ACCESS_REDIRECT;
     }
     if (sys->status == 401 || sys->status == 407) {
@@ -342,6 +354,7 @@ static int Open(vlc_object_t *obj)
 
 error:
     Close(obj);
+    access->p_sys = NULL; /* the next module (VLC's own http) starts clean */
     return VLC_EGENERIC;
 }
 
