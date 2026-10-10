@@ -21,13 +21,15 @@
 
 ## Features
 
-- Plays nearly anything VLC plays: H.264, HEVC (8 and 10-bit), AV1, VP9, VC-1, MPEG-2 and more, up to 4K, with every common audio format, including TrueHD and DTS-HD.
-- **Library** with Home, Videos, Music and Browse: thumbnails, Continue watching, Favourites and search.
+- Plays nearly anything VLC plays: H.264, HEVC (8 and 10-bit), AV1, VP9, VC-1, MPEG-2 and more, up to 4K, with every common audio format, including TrueHD, DTS-HD and Opus.
+- **Hardware decoding** on the PS5's video chip for H.264 and HEVC up to 4K, 10-bit HDR included.
+- **HDR**: HDR10 and HLG go to an HDR TV as HDR, and are tone mapped with natural colours on an SDR one. Dolby Vision files play as their HDR10 base.
+- **Library** with Home, Videos, Music, Playlists and Browse: thumbnails, Continue watching, Favourites and search.
 - **Playlists**: make your own, add any video or song from anywhere with Options, reorder them; covers made from their videos; `.m3u` files on your drives play too.
 - **Subtitles** in every script, styled ASS/SSA, size and colour, delay, plus **OpenSubtitles** downloads.
 - **5.1 / 7.1 surround**, equalizer, night mode and audio delay.
 - **Network**: SMB shares, DLNA servers, network links (HTTP, HLS, DASH…), free TV channels and internet radio.
-- **PC/Phone page**: open `http://<ps5-ip>:8080` to send files to the PS5, use your pc or phone as a remote.
+- **Phone & PC page**: open `http://<ps5-ip>:8080` in any browser to send files to the PS5, download them back to your phone or PC, or add your OpenSubtitles key.
 - Music mode with covers and a visualizer, a photo viewer, DVD / Blu-ray folders, and ZIP / RAR / 7z archives.
 - Two looks (**Classic** and **Modern**) and **16 languages**.
 
