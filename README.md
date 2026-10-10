@@ -103,9 +103,10 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Frame-by-frame step | ✅ |
 | Screenshots to PNG | ✅ |
 | Hardware decoding (H.264 / HEVC) | ✅ |
-| Hardware decoding (VP9 up to 4K) | Not yet |
 | HDR → SDR tone mapping | ✅ |
 | HDR10 output to the TV | ✅ |
+| Hardware decoding (VP9 up to 4K) | Not yet |
+| Upscaling up to 4K (FSR 1, Lanczos, Anime4K etc) | Not yet |
 
 ### 🔊 Audio
 
