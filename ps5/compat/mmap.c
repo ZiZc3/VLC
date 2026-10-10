@@ -150,6 +150,97 @@ static bool unmap_direct(void *addr, size_t len)
     return found;
 }
 
+/*
+ * VLC's big pictures (patches/0015). A 4K 10-bit picture is 25 MiB and VLC
+ * keeps 20 to 30 of them, more than the heap (flexible memory) holds: the
+ * video then failed to start, a black screen (issue #9). Direct memory has
+ * room for them.
+ */
+#define BIG_MAX 128
+static struct {
+    void *addr;
+    size_t len;
+    int64_t start;
+} big_maps[BIG_MAX];
+
+void *vlc_ps5_big_alloc(size_t len)
+{
+    len = (len + DIRECT_ALIGNMENT - 1) & ~(DIRECT_ALIGNMENT - 1);
+    void *result = NULL;
+    pthread_mutex_lock(&direct_lock);
+    int slot = -1;
+    for (int i = 0; i < BIG_MAX && slot < 0; i++) {
+        if (!big_maps[i].addr) {
+            slot = i;
+        }
+    }
+    int64_t start = -1;
+    int rc = slot < 0 ? -1 :
+             sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), len,
+                                           DIRECT_ALIGNMENT, DIRECT_TYPE_CPU, &start);
+    if (rc == 0) {
+        result = ADDRESS_HINT;
+        rc = sceKernelMapDirectMemory(&result, len, KERNEL_PROT_READ | KERNEL_PROT_WRITE,
+                                      0, start, DIRECT_ALIGNMENT);
+        if (rc != 0) {
+            result = NULL;
+            rc = sceKernelMapDirectMemory(&result, len, KERNEL_PROT_READ | KERNEL_PROT_WRITE,
+                                          0, start, DIRECT_ALIGNMENT);
+        }
+        if (rc != 0) {
+            sceKernelReleaseDirectMemory(start, len);
+            result = NULL;
+        }
+    }
+    if (!result && slot >= 0) {
+        /* Direct memory full (the console's video decoder takes much of it
+         * for 4K, console run 7): flexible memory, of which there was 1.6 GiB
+         * left; start -1 marks it. */
+        start = -1;
+        result = ADDRESS_HINT;
+        rc = sceKernelMapFlexibleMemory(&result, len, KERNEL_PROT_READ | KERNEL_PROT_WRITE, 0);
+        if (rc != 0) {
+            result = NULL;
+            rc = sceKernelMapFlexibleMemory(&result, len, KERNEL_PROT_READ | KERNEL_PROT_WRITE, 0);
+        }
+        if (rc != 0)
+            result = NULL;
+    }
+    if (result) {
+        big_maps[slot].addr = result;
+        big_maps[slot].len = len;
+        big_maps[slot].start = start;
+    }
+    pthread_mutex_unlock(&direct_lock);
+    if (!result) {
+        report(slot < 0 ? "big picture (table full)" : "big picture", NULL, len, rc);
+    }
+    return result;
+}
+
+/* 1 if addr was vlc_ps5_big_alloc's (now freed), 0 if not. */
+int vlc_ps5_big_free(void *addr)
+{
+    int found = 0;
+    pthread_mutex_lock(&direct_lock);
+    for (int i = 0; i < BIG_MAX && !found; i++) {
+        if (big_maps[i].addr && big_maps[i].addr == addr) {
+            if (big_maps[i].start < 0) {
+                sceKernelReleaseFlexibleMemory(addr, big_maps[i].len);
+                big_maps[i].addr = NULL;
+                found = 1;
+                break;
+            }
+            sceKernelMunmap(addr, big_maps[i].len);
+            sceKernelReleaseDirectMemory(big_maps[i].start, big_maps[i].len);
+            big_maps[i].addr = NULL;
+            found = 1;
+        }
+    }
+    pthread_mutex_unlock(&direct_lock);
+    return found;
+}
+
 void *__wrap_mmap(void *addr, size_t len, int prot, int flags, int fd,
                   off_t offset)
 {

@@ -38,7 +38,8 @@ mkdir -p "$work/obj" "$work/stubs"
 
 # 1. The plugin table and the library list, read with the PS5 toolchain's nm.
 #    Plus our own plugins (ps5/modules): ps5http, http(s) through the console.
-TARGET=ps5 NM="$sdk/bin/prospero-nm" APP_MODULES="vlc_entry__ps5http"     bash "$here/gen-static-modules.sh" "$static"
+TARGET=ps5 NM="$sdk/bin/prospero-nm" APP_MODULES="vlc_entry__ps5http vlc_entry__ps5vdec" \
+    bash "$here/gen-static-modules.sh" "$static"
 
 # 2. Our objects, in an archive so --exclude-libs=ALL keeps them out of the
 #    title's exports (the converter refuses application exports).
@@ -52,6 +53,7 @@ cc "${cflags[@]}" -c "$static/static_modules.c" -o "$work/obj/static_modules.o"
 cc "${cflags[@]}" -std=c11 -c "$repo/third_party/volk/volk.c" -o "$work/obj/volk.o"
 cc "${cflags[@]}" -std=gnu11 -c "$repo/src/platform_ps5.c" -o "$work/obj/platform_ps5.o"
 cc "${cflags[@]}" -std=gnu11 -c "$here/modules/ps5http.c" -o "$work/obj/ps5http.o"
+cc "${cflags[@]}" -std=gnu11 -c "$here/modules/ps5vdec.c" -o "$work/obj/ps5vdec.o"
 for f in imgui imgui_draw imgui_tables imgui_widgets; do
     cc "${cflags[@]}" "${cxxflags[@]}" -c "$repo/third_party/imgui/$f.cpp" -o "$work/obj/$f.o"
 done
@@ -73,6 +75,10 @@ stub() {
 }
 stub libSceAgc vendor/ps5/sdk/stubs/agc_canary_link_stub.c
 stub libSceAgcDriver vendor/ps5/sdk/stubs/agc_driver_canary_link_stub.c
+# The console's video decoder (ps5/modules/ps5vdec.c): our own stub.
+cc -std=c11 -O2 -fPIC -c "$here/stubs/videodec2_link_stub.c" -o "$work/libSceVideodec2_stub.o"
+"$sdk/bin/prospero-lld" --shared -soname libSceVideodec2.prx \
+    -o "$work/stubs/libSceVideodec2.so" "$work/libSceVideodec2_stub.o"
 
 # 3. VLC's archives for lld: -lfoo becomes our prefix's libfoo.a; the system
 #    libraries (pthread, dl, atomic, ...) are the SDK's .so stubs, linked below.
@@ -142,7 +148,7 @@ fi
     -u vlc_static_modules \
     "$work/app_crt.o" "$work/app_cpp_runtime.o" \
     --start-group "$work/libprobe.a" "${vlc_inputs[@]}" --end-group \
-    "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" \
+    "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" "$work/stubs/libSceVideodec2.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so 2>&1 | tee "$work/link.log" | grep -E "error|warning" | head -60
 [[ ${PIPESTATUS[0]} -eq 0 && -f $work/llvm-pie.elf ]] || { echo "link failed: $work/link.log" >&2; exit 1; }
@@ -152,7 +158,8 @@ grep -aq "Video memory output" "$work/llvm-pie.elf" ||
 
 "$tool" link --in "$work/llvm-pie.elf" --out "$work/eboot.elf" \
     --stub-dir "$sdk/target/lib" --stub "$work/stubs/libSceAgc.so" \
-    --stub "$work/stubs/libSceAgcDriver.so" --module-sdk 0x02000009 \
+    --stub "$work/stubs/libSceAgcDriver.so" --stub "$work/stubs/libSceVideodec2.so" \
+    --module-sdk 0x02000009 \
     --companion-sdk 0x08050001 --file-name eboot.elf
 
 # 5. The title folder.
@@ -191,8 +198,11 @@ cp "$repo/assets/fonts/Inter-SemiBold.ttf" "$app/fonts/subtitle.ttf"
 cp "$repo/assets/fonts/Inter-Regular.ttf" "$app/fonts/mono.ttf"
 # Noto fonts for the scripts Inter lacks (Arabic, Hebrew, CJK, Thai, ...):
 # subtitles (patches/0005) and file names in the interface.
-mkdir -p "$app/fonts/fallback"
-cp "$repo/assets/fonts/fallback/"* "$app/fonts/fallback/"
+mkdir -p "$app/fonts/fallback" "$app/fonts/licenses"
+# only fonts in fallback/: libass loads every file there (the OFL texts were
+# "Error opening memory font" in every log); their licences beside them
+cp "$repo/assets/fonts/fallback/"*.tt[fc] "$app/fonts/fallback/"
+cp "$repo/assets/fonts/fallback/"*.txt "$app/fonts/licenses/"
 # HTTPS: Mozilla's CA list (curl.se/ca), where GnuTLS looks for it (/app0/certs).
 mkdir -p "$app/certs"
 cp "$repo/assets/certs/cacert.pem" "$app/certs/"

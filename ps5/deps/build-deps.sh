@@ -264,6 +264,10 @@ build_smb2() {
     fetch "https://github.com/sahlberg/libsmb2/archive/refs/tags/libsmb2-$v.tar.gz" "libsmb2-$v.tar.gz"
     unpack "libsmb2-$v.tar.gz" "$d"
     patch -d "$src/$d" -p1 -s < "$src/vlc-3.0.24/contrib/src/smb2/0001-cmake-add-ENABLE_LIBKRB5-and-ENABLE_GSSAPI-options.patch"
+    # VLC-PS5's own (patches/smb2/): big socket buffers (the TCP window)
+    for p in "$(dirname "$(dirname "$here")")"/patches/smb2/*.patch; do
+        patch -d "$src/$d" -p1 -s < "$p"
+    done
     cmake -S "$src/$d" -B "$src/build-smb2-$target" -G Ninja ${cmake_cross:-} \
         -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
