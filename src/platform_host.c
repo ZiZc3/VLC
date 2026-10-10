@@ -23,7 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define MAX_STEPS 512
+#define MAX_STEPS 20000 /* a long stress tour has thousands */
 
 typedef struct {
     uint64_t frame;

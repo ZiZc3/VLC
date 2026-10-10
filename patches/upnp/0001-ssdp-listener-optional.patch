@@ -1,0 +1,55 @@
+--- a/upnp/src/ssdp/ssdp_server.c	2026-10-09 20:35:17.057957885 +0000
++++ b/upnp/src/ssdp/ssdp_server.c	2026-10-09 20:35:17.058290985 +0000
+@@ -981,6 +981,7 @@
+ 			INADDR_ANY,
+ 			SSDP_PORT,
+ 			errorBuffer);
++		fprintf(stderr, "upnp: bind UDP %d: %s\n", SSDP_PORT, errorBuffer);
+ 		ret = UPNP_E_SOCKET_BIND;
+ 		goto error_handler;
+ 	}
+@@ -1509,10 +1510,23 @@
+ 		retVal = create_ssdp_sock_v4(&out->ssdpSock4);
+ 		if (retVal != UPNP_E_SUCCESS) {
+ 	#ifdef INCLUDE_CLIENT_APIS
+-			UpnpCloseSocket(out->ssdpReqSock4);
+-			UpnpCloseSocket(out->ssdpReqSock6);
+-	#endif /* INCLUDE_CLIENT_APIS */
++			/* VLC-PS5: port 1900 taken (the console's own SSDP,
++			 * another user: no SO_REUSEPORT sharing when sandboxed).
++			 * A control point searches without it. */
++			if (out->ssdpReqSock4 != INVALID_SOCKET) {
++				fprintf(stderr,
++					"upnp: no SSDP listener on port 1900 (%d): "
++					"searching only\n",
++					retVal);
++				out->ssdpSock4 = INVALID_SOCKET;
++			} else {
++				UpnpCloseSocket(out->ssdpReqSock4);
++				UpnpCloseSocket(out->ssdpReqSock6);
++				return retVal;
++			}
++	#else
+ 			return retVal;
++	#endif /* INCLUDE_CLIENT_APIS */
+ 		}
+ 	} else
+ 		out->ssdpSock4 = INVALID_SOCKET;
+--- a/upnp/src/genlib/miniserver/miniserver.c	2026-10-09 20:35:17.061594185 +0000
++++ b/upnp/src/genlib/miniserver/miniserver.c	2026-10-09 20:35:17.061755185 +0000
+@@ -1046,6 +1046,7 @@
+ 			"Error in IPv%d bind(): %s\n",
+ 			s->ip_version,
+ 			errorBuffer);
++		fprintf(stderr, "upnp: miniserver IPv%d bind: %s\n", s->ip_version, errorBuffer);
+ 		/* Bind failed. */
+ 		ret_val = UPNP_E_SOCKET_BIND;
+ 		goto error;
+@@ -1298,6 +1299,7 @@
+ 			__FILE__,
+ 			__LINE__,
+ 			"Error in binding localhost!!!\n");
++		fprintf(stderr, "upnp: stop socket bind 127.0.0.1: errno %d\n", errno);
+ 		sock_close(miniServerStopSock);
+ 		return UPNP_E_SOCKET_BIND;
+ 	}

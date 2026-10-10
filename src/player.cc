@@ -57,6 +57,9 @@ libvlc_media_player_t *mp;
 std::string current_path;
 VideoInfo info;
 int info_tries;
+/* VLC set up new pictures (a stream changing quality or shape mid-way):
+ * the size and shape are read again (issue #6: IPTV "zooms after a while") */
+std::atomic<bool> info_stale{ false };
 
 /* Decoding speed. A file the CPU can't decode in real time makes VLC drop
  * every late picture, so the screen freezes while the sound and the clock go
@@ -242,6 +245,7 @@ unsigned vmem_setup(void **opaque, char *chroma, unsigned *width, unsigned *heig
         s.state = FREE;
     }
     format = f;
+    info_stale = true;
     generation++;
     fprintf(stderr, "player: pictures %ux%u %s%s, %d x %llu KiB\n", f.width, f.height,
             ten ? "10-bit" : "8-bit", full ? " full range" : "", SLOTS,
@@ -341,6 +345,13 @@ struct AudioBlock {
 
 std::mutex audio_lock;
 std::deque<AudioBlock> audio_queue;
+size_t audio_queued_frames; /* frames in audio_queue not played yet (audio_lock) */
+
+void audio_clear_locked()
+{
+    audio_queue.clear();
+    audio_queued_frames = 0;
+}
 bool audio_paused;
 float audio_gain = 1.0f; /* VLC's (mute) */
 float user_gain = 1.0f;  /* the app's volume */
@@ -384,8 +395,16 @@ void amem_play(void *opaque, const void *samples, unsigned count, int64_t pts)
     b.samples.assign((const int16_t *)samples, (const int16_t *)samples + (size_t)count * b.channels);
     b.pos = 0;
     b.pts = pts;
-    if (audio_queue.size() > 400) /* ~4 s: something is stuck; keep memory bounded */
+    /* At most ~4 s of sound queued (something is stuck past that; memory
+     * stays bounded). Counted in time, not blocks: TrueHD sends 40-sample
+     * blocks (0.8 ms), and 400 of them was a third of a second, less than VLC
+     * queues ahead, so the blocks due next were thrown away: no sound. */
+    audio_queued_frames += count;
+    while (audio_queued_frames > 4 * AUDIO_RATE && !audio_queue.empty()) {
+        AudioBlock &old = audio_queue.front();
+        audio_queued_frames -= std::min(audio_queued_frames, old.samples.size() / old.channels - old.pos);
         audio_queue.pop_front();
+    }
     audio_queue.push_back(std::move(b));
 }
 
@@ -407,7 +426,7 @@ void amem_flush(void *opaque, int64_t pts)
 {
     (void)opaque; (void)pts;
     std::lock_guard<std::mutex> g(audio_lock);
-    audio_queue.clear();
+    audio_clear_locked();
 }
 
 void amem_drain(void *opaque)
@@ -518,7 +537,10 @@ void audio_main()
                 if (at < slot_time - 60000) {
                     /* Late by more than 60 ms (after a stall): drop to catch up. */
                     size_t skip = (size_t)((slot_time - at) * AUDIO_RATE / 1000000);
+                    if (skip > frames - b.pos)
+                        skip = frames - b.pos;
                     b.pos += skip;
+                    audio_queued_frames -= std::min(audio_queued_frames, skip);
                     if (b.pos >= frames)
                         audio_queue.pop_front();
                     continue;
@@ -531,6 +553,7 @@ void audio_main()
                               &mix[(filled + f) * out_ch], out_ch, k);
                 filled += n;
                 b.pos += n;
+                audio_queued_frames -= std::min(audio_queued_frames, n);
                 if (b.pos >= frames)
                     audio_queue.pop_front();
             }
@@ -1559,7 +1582,7 @@ PlayerEvent player_tick()
             libvlc_media_player_stop(mp);
             {
                 std::lock_guard<std::mutex> g(audio_lock);
-                audio_queue.clear();
+                audio_clear_locked();
             }
             sub_attach_all = true;
             player_open(path, at > 0 ? at : 0);
@@ -1628,7 +1651,7 @@ PlayerEvent player_tick()
         libvlc_media_player_stop(mp);
         {
             std::lock_guard<std::mutex> g(audio_lock);
-            audio_queue.clear();
+            audio_clear_locked();
         }
         player_open(path, at > 0 ? at : 0);
         return PLAYER_EVENT_WENT_FAST;
@@ -1646,7 +1669,7 @@ void player_stop()
     pause_wanted = -1;
     stop_in_background();
     std::lock_guard<std::mutex> g(audio_lock);
-    audio_queue.clear();
+    audio_clear_locked();
     audio_paused = false;
 }
 
@@ -1804,7 +1827,7 @@ void player_toggle_pause()
         stop_in_background();
         live_paused = true;
         std::lock_guard<std::mutex> g(audio_lock);
-        audio_queue.clear();
+        audio_clear_locked();
         return;
     }
     bool want = !player_paused();
@@ -1916,16 +1939,17 @@ void player_debug_line()
             snprintf(slots_text + strlen(slots_text), sizeof(slots_text) - strlen(slots_text), "%s ",
                      s.buffer ? names[s.state] : "-");
     }
-    size_t queued;
+    size_t queued, queued_ms;
     {
         std::lock_guard<std::mutex> g(audio_lock);
         queued = audio_queue.size();
+        queued_ms = audio_queued_frames * 1000 / AUDIO_RATE;
     }
     libvlc_media_stats_t s = {};
     get_stats(&s);
-    fprintf(stderr, "player: state %d, time %lld / %lld ms, slots [%s], audio blocks %zu, frame %llu done %llu, "
+    fprintf(stderr, "player: state %d, time %lld / %lld ms, slots [%s], audio blocks %zu (%zu ms), frame %llu done %llu, "
             "pictures +%d decoded +%d shown +%d lost, input %.0f kbit/s%s\n",
-            (int)state(), (long long)player_time(), (long long)player_length(), slots_text, queued,
+            (int)state(), (long long)player_time(), (long long)player_length(), slots_text, queued, queued_ms,
             (unsigned long long)gfx.frame_number, (unsigned long long)completed_frame.load(),
             s.i_decoded_video - debug_last.i_decoded_video,
             s.i_displayed_pictures - debug_last.i_displayed_pictures,
@@ -1993,14 +2017,20 @@ bool add_ready_subtitle(const std::string &path, const std::string &ready)
     /* the file VLC got is the one a reopen attaches again */
     if (r == 0 && std::find(kept.subs.begin(), kept.subs.end(), ready) == kept.subs.end())
         kept.subs.push_back(ready);
-    /* VLC jumps to put the new track in step: not a "can't keep up" second */
+    /* VLC jumps to put the new track in step and decodes its way back (a
+     * console log: 73 decoded, 11 shown 4 s after): not "can't keep up" */
     health.primed = false;
-    health.next = plat_time() + 3;
+    health.next = plat_time() + 6;
     return r == 0;
 }
 
 const VideoInfo &player_video_info()
 {
+    if (info_stale.exchange(false) && info.width) {
+        fprintf(stderr, "player: picture format changed: size and shape read again\n");
+        info = VideoInfo{};
+        info_tries = 0;
+    }
     if (!info.width && mp && info_tries++ % 15 == 0)
         read_info();
     return info;
