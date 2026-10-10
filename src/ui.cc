@@ -7117,6 +7117,10 @@ void player_screen()
             meta += "  \xC2\xB7  " + v.codec;
         if (v.ten_bit)
             meta += "  \xC2\xB7  10-bit";
+        if (v.hdr)
+            meta += v.hdr == 2 ? "  \xC2\xB7  HLG" : "  \xC2\xB7  HDR10";
+        if (v.hardware)
+            meta += "  \xC2\xB7  HW";
     }
     if (!v.audio_codec.empty()) {
         meta += (meta.empty() ? "" : "  \xC2\xB7  ") + v.audio_codec;

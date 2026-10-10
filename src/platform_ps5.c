@@ -124,12 +124,80 @@ static void crash_handler(int sig, siginfo_t *info, void *context)
 
 /* " name " of each import left unresolved: optional calls check it first. */
 static char unresolved[2048] = " ";
+/* the video decoder's import slots (imports.txt), checked once its library
+ * is loaded */
+#define VDEC_SLOTS 16
+static struct {
+    unsigned long offset;
+    char name[48];
+} vdec_slots[VDEC_SLOTS];
+static int vdec_slot_count;
 
 static bool import_resolved(const char *name)
 {
     char key[160];
     snprintf(key, sizeof(key), " %s ", name);
     return strstr(unresolved, key) == NULL;
+}
+
+/* settings.txt's "key=value" at start (read before full access: /app0 may
+ * be gone after it). */
+static int boot_setting(const char *key, int fallback)
+{
+    FILE *s = fopen(APP_DIR "/settings.txt", "r");
+    if (!s)
+        return fallback;
+    char line[128];
+    size_t n = strlen(key);
+    int value = fallback;
+    while (fgets(line, sizeof(line), s))
+        if (!strncmp(line, key, n) && line[n] == '=')
+            value = atoi(line + n + 1);
+    fclose(s);
+    return value;
+}
+
+/* The console's video decoder (ps5/modules/ps5vdec.c). Its library (sysmodule
+ * 207) and compute queue are made before the Helper's full access: after it
+ * the library is refused (0x80020063, console run 11) and the queue too
+ * (0x811D0111, run 12). Run 10's "no jailbreak daemon answered" with the
+ * library loaded first was the Helper not running then (run 12: it answered
+ * in 60 ms). settings.txt vdec_load=0 loads it after full access instead,
+ * hw_decode=0 not at all. */
+int sceSysmoduleLoadModule(uint16_t id);
+void vlc_ps5_vdec_prepare(void) __attribute__((weak));   /* ps5/modules/ps5vdec.c */
+#define SYSMODULE_VIDEODEC2 207
+static bool vdec_ready;
+static double jb_wait = 2.5;   /* seconds the Helper has to answer */
+
+static void load_video_decoder(void)
+{
+    /* (the decoder's own functions only get their addresses with the
+     * library: they're checked after loading it, below) */
+    if (!import_resolved("sceSysmoduleLoadModule")) {
+        fprintf(stderr, "VLC-PS5: hardware decoding off: sceSysmoduleLoadModule unresolved\n");
+        return;
+    }
+    int rc = sceSysmoduleLoadModule(SYSMODULE_VIDEODEC2);
+    vdec_ready = rc == 0;
+    /* now its functions must have their addresses (imports.txt known): an
+     * empty one would be a jump to 0 */
+    for (int i = 0; vdec_ready && i < vdec_slot_count; i++) {
+        if (*(const uint64_t *)(EBOOT_BASE + vdec_slots[i].offset) == 0) {
+            fprintf(stderr, "VLC-PS5: %s still unresolved after loading the library\n", vdec_slots[i].name);
+            vdec_ready = false;
+        }
+    }
+    fprintf(stderr, "VLC-PS5: video decoder library %#x: hardware decoding %s (%d functions checked)\n",
+            (unsigned)rc, vdec_ready ? "on" : "off", vdec_slot_count);
+    /* its compute queue now too, while still in the sandbox */
+    if (vdec_ready && vlc_ps5_vdec_prepare)
+        vlc_ps5_vdec_prepare();
+}
+
+int vlc_ps5_vdec_available(void)
+{
+    return vdec_ready;
 }
 
 /* Every import the console left unresolved (a call would jump to 0), in one
@@ -146,6 +214,16 @@ static void report_unresolved_imports(void)
     int checked = 0, missing = 0;
     while (fscanf(f, "%lx %127s", &offset, name) == 2) {
         checked++;
+        /* the video decoder's are filled in when its library is loaded
+         * (load_video_decoder), not at start: looked at after that */
+        if (!strncmp(name, "sceVideodec2", 12)) {
+            if (vdec_slot_count < VDEC_SLOTS) {
+                vdec_slots[vdec_slot_count].offset = offset;
+                snprintf(vdec_slots[vdec_slot_count].name, sizeof(vdec_slots[0].name), "%s", name);
+                vdec_slot_count++;
+            }
+            continue;
+        }
         if (*(const uint64_t *)(EBOOT_BASE + offset) == 0) {
             fprintf(stderr, "VLC-PS5: unresolved import: %s\n", name);
             if (strlen(unresolved) + strlen(name) + 2 < sizeof(unresolved)) {
@@ -176,11 +254,48 @@ static bool exists(const char *path)
  * resolve; otherwise the sandbox's own copy of it (/mnt/sandbox/<title>_NNN/app0,
  * the folder the daemon found our request in) or the folder
  * ShadowMountPlus launched us from. */
+/* Our folder is marked before full access (/app0 is gone after it), so the
+ * search below finds this launch's folder and not another: the first
+ * PPSA85300_ entry of /mnt/sandbox, as first done, could be an older launch's
+ * or another copy of the app, whose prefs.txt then came up (the look
+ * switching between Classic and Modern "by itself"). */
+#define INSTANCE_FILE "/cache/instance.txt"
+static char instance_mark[64];
+
+static void mark_app_dir(void)
+{
+    snprintf(instance_mark, sizeof(instance_mark), "%d-%.0f", (int)getpid(), plat_time() * 1000);
+    mkdir(APP_DIR "/cache", 0777);
+    FILE *f = fopen(APP_DIR INSTANCE_FILE, "w");
+    if (!f) {
+        instance_mark[0] = 0;
+        return;
+    }
+    fputs(instance_mark, f);
+    fclose(f);
+}
+
+static bool is_marked(const char *dir)
+{
+    if (!instance_mark[0])
+        return false;
+    char path[300], got[64] = "";
+    snprintf(path, sizeof(path), "%s" INSTANCE_FILE, dir);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    if (!fgets(got, sizeof(got), f))
+        got[0] = 0;
+    fclose(f);
+    return !strcmp(got, instance_mark);
+}
+
 static void find_app_dir(void)
 {
     if (exists(APP_DIR "/eboot.bin"))
         return;
-    char path[256];
+    char path[256], first[256] = "";
+    int candidates = 0;
     DIR *d = opendir("/mnt/sandbox");
     if (d) {
         struct dirent *e;
@@ -188,13 +303,27 @@ static void find_app_dir(void)
             if (strncmp(e->d_name, VLC_PS5_TITLE_ID "_", sizeof(VLC_PS5_TITLE_ID)))
                 continue;
             snprintf(path, sizeof(path), "/mnt/sandbox/%s/app0/eboot.bin", e->d_name);
-            if (exists(path)) {
-                snprintf(app_dir, sizeof(app_dir), "/mnt/sandbox/%s/app0", e->d_name);
+            if (!exists(path))
+                continue;
+            candidates++;
+            snprintf(path, sizeof(path), "/mnt/sandbox/%s/app0", e->d_name);
+            fprintf(stderr, "VLC-PS5: candidate folder %s%s\n", path, is_marked(path) ? " (ours)" : "");
+            if (!first[0])
+                snprintf(first, sizeof(first), "%s", path);
+            if (is_marked(path)) {
+                snprintf(app_dir, sizeof(app_dir), "%s", path);
                 break;
             }
         }
         closedir(d);
     }
+    /* no mark found: the first one, as before */
+    if (!strcmp(app_dir, APP_DIR) && first[0] && !(instance_mark[0] && candidates > 1))
+        snprintf(app_dir, sizeof(app_dir), "%s", first);
+    if (!strcmp(app_dir, APP_DIR) && is_marked("/data/homebrew/" VLC_PS5_TITLE_ID))
+        snprintf(app_dir, sizeof(app_dir), "/data/homebrew/" VLC_PS5_TITLE_ID);
+    if (!strcmp(app_dir, APP_DIR) && first[0])
+        snprintf(app_dir, sizeof(app_dir), "%s", first);
     if (!strcmp(app_dir, APP_DIR) && exists("/data/homebrew/" VLC_PS5_TITLE_ID "/eboot.bin"))
         snprintf(app_dir, sizeof(app_dir), "/data/homebrew/" VLC_PS5_TITLE_ID);
     if (!strcmp(app_dir, APP_DIR))
@@ -224,6 +353,7 @@ static bool lifted(void)
 
 static void request_full_access(void)
 {
+    mark_app_dir();
     if (lifted()) {
         full_access = true;
         fprintf(stderr, "VLC-PS5: full access already (euid %d)\n", (int)__real_geteuid());
@@ -268,12 +398,14 @@ static void request_full_access(void)
         unlink(JB_STAGED);
         return;
     }
+    /* (2.5 s: a busy daemon took longer than the 1 s first allowed) */
     double start = plat_time();
-    while (exists(JB_REQUEST) && plat_time() - start < 1.0)
+    while (exists(JB_REQUEST) && plat_time() - start < jb_wait)
         usleep(20000);
     if (exists(JB_REQUEST)) {
         unlink(JB_REQUEST); /* nobody listening: don't leave it for a daemon started later */
-        fprintf(stderr, "VLC-PS5: sandboxed (no jailbreak daemon answered in 1 s)\n");
+        fprintf(stderr, "VLC-PS5: sandboxed (no jailbreak daemon answered in %.1f s): no phone/PC page, "
+                        "no DLNA server; is etaHEN or the Helper running, PPSA85300 whitelisted?\n", jb_wait);
         return;
     }
     /* Taken. Daemons set the effective uid (the real one can stay as it was)
@@ -310,6 +442,10 @@ static void use_app_dir(void)
     snprintf(path, sizeof(path), "%s/cache/mesa", app_dir);
     mkdir(path, 0777);
     setenv("MESA_SHADER_CACHE_DIR", path, 1);
+    /* libbluray keeps its cache in $HOME/.cache/bluray and makes only the
+     * last folder ("Error creating directory" in every disc's log) */
+    snprintf(path, sizeof(path), "%s/.cache", app_dir);
+    mkdir(path, 0777);
     fprintf(stderr, "VLC-PS5: shader caches in %s/cache\n", app_dir);
 }
 
@@ -378,7 +514,19 @@ void plat_init(void)
     signal(SIGPIPE, SIG_IGN);
 
     report_unresolved_imports();
+    /* the decoder library and its compute queue first, then full access: the
+     * Helper answered in 60 ms with them loaded (console run 12), and both
+     * fail after full access (0x80020063, 0x811D0111). vdec_load=0: after. */
+    int hw_decode = boot_setting("hw_decode", 1), vdec_load = boot_setting("vdec_load", 1);
+    if (!hw_decode)
+        fprintf(stderr, "VLC-PS5: hardware decoding off (settings.txt): decoder library not loaded\n");
+    if (hw_decode && vdec_load == 1) {
+        load_video_decoder();
+        jb_wait = 6;
+    }
     request_full_access();
+    if (hw_decode && vdec_load != 1)
+        load_video_decoder();
     use_app_dir();
 }
 

@@ -30,7 +30,7 @@ defs=(-DVK_NO_PROTOTYPES -DIMGUI_IMPL_VULKAN_USE_VOLK -DVLCPS5_HOST)
 cflags=(-O2 -g -Wall -Wno-unused-function "${san[@]}" "${defs[@]}" "${inc[@]}")
 # the newest of our headers: a file is built again when one changed (a struct
 # that grew, a default argument) not only when the file itself did
-newest_h=$(ls -t "$repo"/src/*.h | head -1)
+newest_h=$(ls -t "$repo"/src/*.h "$repo"/src/gen/*.h | head -1)
 
 objs=()
 compile() { # source compiler [flags...]

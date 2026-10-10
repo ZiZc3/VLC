@@ -462,6 +462,12 @@ void web_start()
         a.sin_addr.s_addr = htonl(INADDR_ANY);
         if (bind(listen_fd, (sockaddr *)&a, sizeof(a)) == 0)
             break;
+        if (errno == EACCES) {
+            /* the sandbox: no port will do */
+            fprintf(stderr, "web: not allowed to listen (sandboxed: the page needs full access)\n");
+            p = LAST_PORT + 1;
+            break;
+        }
         fprintf(stderr, "web: port %d taken (errno %d)\n", p, errno);
     }
     if (p > LAST_PORT || listen(listen_fd, 8) != 0) {

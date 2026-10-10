@@ -664,6 +664,8 @@ void look_at(const Job &job)
         libvlc_media_add_option(m, ":no-audio");
         libvlc_media_add_option(m, ":no-spu");
         libvlc_media_add_option(m, ":avcodec-threads=2");
+        /* the console's video decoder stays for the video being watched */
+        libvlc_media_add_option(m, ":no-ps5vdec");
         Grab g;
         g.frames = 0;
         g.got = false;

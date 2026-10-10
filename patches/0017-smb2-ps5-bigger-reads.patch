@@ -1,0 +1,49 @@
+--- a/modules/access/smb2.c
++++ b/modules/access/smb2.c
+@@ -123,6 +123,7 @@
+     struct srvsvc_netshareenumall_rep *share_enum;
+ #endif
+     uint64_t                smb2_size;
++    uint64_t                pos;      /* VLC-PS5: where the next read starts */
+     vlc_url_t               encoded_url;
+     bool                    eof;
+     bool                    smb2_connected;
+@@ -320,8 +321,20 @@
+     /* Limit the read size since smb2_read_async() will complete only after
+      * reading the whole requested data and not when whatever data is available
+      * (high read size means a faster I/O but a higher latency). */
+-    if (len > 262144)
+-        len = 262144;
++    /* VLC-PS5: 2 MiB, fewer requests each waiting a network round trip
++     * (a 4K film needs 9 MB/s; 256 KiB at a time over Wi-Fi didn't make it),
++     * and never past the end of the file: a read crossing it failed, and with
++     * it the last metadata of a 13 GB Blu-ray image (console run 14) */
++    if (len > 2097152)
++        len = 2097152;
++    if (sys->smb2_size > 0) {
++        if (sys->pos >= sys->smb2_size) {
++            sys->eof = true;
++            return 0;
++        }
++        if (len > sys->smb2_size - sys->pos)
++            len = sys->smb2_size - sys->pos;
++    }
+ 
+     struct vlc_smb2_op op = VLC_SMB2_OP(access, &sys->smb2);
+     op.res.read.len = 0;
+@@ -339,6 +352,7 @@
+ 
+     if (op.res.read.len == 0)
+         sys->eof = true;
++    sys->pos += op.res.read.len;
+ 
+     return op.res.read.len;
+ }
+@@ -366,6 +380,7 @@
+         VLC_SMB2_SET_ERROR(&op, "smb2_lseek", err);
+         return err;
+     }
++    sys->pos = i_pos;
+     sys->eof = false;
+ 
+     return VLC_SUCCESS;

@@ -1,0 +1,34 @@
+--- a/modules/video_output/vmem.c
++++ b/modules/video_output/vmem.c
+@@ -249,6 +249,10 @@
+     return sys->pool;
+ }
+ 
++/* VLC-PS5: the app's picture copy, when it has one */
++extern void vlc_ps5_copy_plane(uint8_t *, size_t, const uint8_t *, size_t, size_t,
++                               unsigned) __attribute__((weak));
++
+ static void Prepare(vout_display_t *vd, picture_t *pic, subpicture_t *subpic)
+ {
+     vout_display_sys_t *sys = vd->sys;
+@@ -265,7 +269,19 @@
+ 
+     picture_t *locked = picture_NewFromResource(&vd->fmt, &rsc);
+     if (likely(locked != NULL)) {
+-        picture_CopyPixels(locked, pic);
++        if (vlc_ps5_copy_plane != NULL) {
++            /* VLC-PS5: split over a few threads (a 4K picture is 25 MiB) */
++            for (int i = 0; i < locked->i_planes && i < pic->i_planes; i++) {
++                const plane_t *d = &locked->p[i], *s = &pic->p[i];
++                int lines = __MIN(d->i_visible_lines, s->i_visible_lines);
++                int bytes = __MIN(d->i_visible_pitch, s->i_visible_pitch);
++                if (lines > 0 && bytes > 0)
++                    vlc_ps5_copy_plane(d->p_pixels, d->i_pitch, s->p_pixels, s->i_pitch,
++                                       bytes, lines);
++            }
++        } else {
++            picture_CopyPixels(locked, pic);
++        }
+         picture_Release(locked);
+     }
+ 

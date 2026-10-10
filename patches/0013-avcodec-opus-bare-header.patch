@@ -1,0 +1,35 @@
+--- a/modules/codec/avcodec/audio.c
++++ b/modules/codec/avcodec/audio.c
+@@ -37,6 +37,7 @@
+ #include <vlc_avcodec.h>
+ 
+ #include "avcodec.h"
++#include "../../demux/xiph.h"
+ 
+ #include <libavcodec/avcodec.h>
+ #include <libavutil/mem.h>
+@@ -103,6 +104,24 @@
+                 i_size = 0;
+         }
+ 
++        /* VLC-PS5: VLC's demuxers hand Opus over as packed Xiph headers
++         * (OpusHead, OpusTags) for its own opus module; FFmpeg's decoder
++         * wants the OpusHead alone, else it reads no channels and fails */
++        if( p_dec->fmt_in.i_codec == VLC_CODEC_OPUS &&
++            ( i_size < 8 || memcmp( p_src, "OpusHead", 8 ) ) )
++        {
++            unsigned sizes[XIPH_MAX_HEADER_COUNT];
++            const void *headers[XIPH_MAX_HEADER_COUNT];
++            unsigned count;
++            if( !xiph_SplitHeaders( sizes, headers, &count, i_size, p_src ) &&
++                count > 0 && sizes[0] >= 19 &&
++                !memcmp( headers[0], "OpusHead", 8 ) )
++            {
++                i_offset = (const uint8_t *)headers[0] - p_src;
++                i_size = sizes[0];
++            }
++        }
++
+         if( i_size > 0 )
+         {
+             p_context->extradata =

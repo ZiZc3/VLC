@@ -24,6 +24,8 @@ struct VideoInfo {
     uint32_t width, height; /* visible size */
     float aspect;           /* display aspect, sample aspect applied */
     bool ten_bit;
+    int hdr;                /* 0 SDR, 1 HDR10 (PQ), 2 HLG */
+    bool hardware;          /* on the console's video decoder */
     float fps;              /* 0 if the file doesn't say */
     std::string codec, audio_codec;
     unsigned audio_channels;
@@ -88,6 +90,9 @@ void player_spectrum(float *bands, int n);
 /* Render thread, every frame: */
 void video_upload(VkCommandBuffer cmd);           /* before the render pass */
 bool video_has_picture();
+/* An HDR video is showing and HDR10 output is wanted for it (settings.txt
+ * hdr_output, the console's output). */
+bool video_wants_hdr_output();
 void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h); /* in the pass */
 void video_forget_picture();                      /* back to the library */
 /* One line about the player in the log (state, time, picture slots, sound queue,

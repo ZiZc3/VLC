@@ -23,7 +23,7 @@ extern "C" {
 #endif
 
 #define VLC_PS5_TITLE_ID "PPSA85300"
-#define VLC_PS5_VERSION "0.3.1"
+#define VLC_PS5_VERSION "0.4"
 
 /* DualSense buttons (scePadRead's layout, as QUICK3 and PS5_vkQuake use it),
  * plus the triggers past half as buttons. */

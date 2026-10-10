@@ -78,6 +78,9 @@ int main(void)
         double t = plat_time();
         float dt = (float)(t - last);
         last = t;
+        /* the interface stood still: always in the log (a freeze report) */
+        if (dt > 0.5f && gfx.frame_number > 10)
+            fprintf(stderr, "ui: a frame took %.0f ms (the interface froze)\n", dt * 1000);
         PadState pad;
         plat_pad_read(&pad);
         library_update();
@@ -92,16 +95,36 @@ int main(void)
         ImGui::Render();
         double t_ui = plat_time();
 
+        /* HDR10 output while an HDR video shows (once a refusal, not again
+         * until the wish changes) */
+        static bool hdr_refused;
+        bool want_hdr = video_wants_hdr_output();
+        if (want_hdr != gfx.hdr && !(want_hdr && hdr_refused))
+            hdr_refused = !gfx_set_hdr(want_hdr);
+        if (!want_hdr)
+            hdr_refused = false;
+
         VkCommandBuffer cmd = gfx_begin_frame();
         if (!cmd)
             continue;
         double t_begin = plat_time();
         video_upload(cmd);
-        gfx_begin_pass(cmd);
         float vx, vy, vw, vh;
-        if (ui_video_rect(&vx, &vy, &vw, &vh))
-            video_draw(cmd, vx, vy, vw, vh);
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+        bool video = ui_video_rect(&vx, &vy, &vw, &vh);
+        if (gfx.hdr) {
+            /* the UI in its layer, then the video as PQ and the layer over it */
+            gfx_begin_ui_pass(cmd);
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+            gfx_begin_hdr_pass(cmd);
+            if (video)
+                video_draw(cmd, vx, vy, vw, vh);
+            gfx_draw_ui_layer(cmd);
+        } else {
+            gfx_begin_pass(cmd);
+            if (video)
+                video_draw(cmd, vx, vy, vw, vh);
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);
+        }
         gfx_end_frame(cmd);
         double t_end = plat_time();
 

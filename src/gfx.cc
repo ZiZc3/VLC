@@ -11,16 +11,23 @@
 #include "gfx.h"
 #include "image.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <vector>
 
 #include "platform.h"
+#include "gen/fullscreen_vert.h"
+#include "gen/ui_pq_frag.h"
 
 #ifdef VLCPS5_HOST
 #include <zlib.h>
 #endif
+
+/* The console's Vulkan driver, with patches/mesa/0001 (absent elsewhere). */
+extern "C" int vlcps5_wsi_videoout_set_hdr(int enable) __attribute__((weak));
+extern "C" int vlcps5_wsi_videoout_dynamic_range(void) __attribute__((weak));
 
 Gfx gfx;
 
@@ -49,6 +56,26 @@ VkCommandPool setup_pool;
 VkDeviceMemory offscreen_memory, readback_memory;
 VkBuffer readback;
 void *readback_mapped;
+
+/* HDR10 output (gfx.h): the UI layer, the 10-bit frame and the pipeline that
+ * puts the first over the second. 10:10:10:2 with blue in the low bits: the
+ * framebuffers' B,G,R order (VideoOut's Bgr10A2), as their 8-bit SDR is. */
+const VkFormat HDR_FORMAT = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+const float UI_NITS = 203; /* BT.2408's graphics white */
+struct Hdr {
+    VkImage ui_image, image;
+    VkDeviceMemory ui_memory, memory;
+    VkImageView ui_view, view;
+    VkRenderPass ui_pass;
+    VkFramebuffer ui_fb, fb;
+    VkSampler sampler;
+    VkDescriptorSetLayout set_layout;
+    VkDescriptorPool pool;
+    VkDescriptorSet set;
+    VkPipelineLayout layout;
+    VkPipeline pipeline;
+} hdr;
+enum PassNow { PASS_NONE, PASS_MAIN, PASS_UI, PASS_HDR } pass_now;
 
 #define CHECK(expr)                                                          \
     do {                                                                     \
@@ -168,7 +195,8 @@ bool create_swapchain()
     info.imageColorSpace = chosen.colorSpace;
     info.imageExtent = { gfx.width, gfx.height };
     info.imageArrayLayers = 1;
-    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    /* (copied into in HDR10 output: the 10-bit frame) */
+    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     info.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
@@ -193,8 +221,9 @@ bool create_offscreen()
     VkImage image;
     VkImageView view;
     if (!gfx_image(gfx.width, gfx.height, gfx.format,
-                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &image,
-                   &offscreen_memory, &view))
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                       VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                   &image, &offscreen_memory, &view))
         return false;
     images.push_back(image);
     views.push_back(view);
@@ -294,6 +323,223 @@ bool create_targets()
     return true;
 }
 
+/* A pass over one colour attachment, cleared, ending in `final` and made
+ * visible to `next_stage`/`next_access` (what reads it next). */
+bool make_pass(VkFormat format, VkImageLayout final, VkPipelineStageFlags next_stage,
+               VkAccessFlags next_access, VkRenderPass *pass)
+{
+    VkAttachmentDescription color = {};
+    color.format = format;
+    color.samples = VK_SAMPLE_COUNT_1_BIT;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color.finalLayout = final;
+    VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription subpass = {};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &ref;
+    VkSubpassDependency deps[3] = {};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    deps[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].dstSubpass = 0;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    deps[2].srcSubpass = 0;
+    deps[2].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[2].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[2].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[2].dstStageMask = next_stage;
+    deps[2].dstAccessMask = next_access;
+    VkRenderPassCreateInfo rp = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    rp.attachmentCount = 1;
+    rp.pAttachments = &color;
+    rp.subpassCount = 1;
+    rp.pSubpasses = &subpass;
+    rp.dependencyCount = 3;
+    rp.pDependencies = deps;
+    CHECK(vkCreateRenderPass(gfx.device, &rp, nullptr, pass));
+    return true;
+}
+
+bool make_framebuffer(VkRenderPass pass, VkImageView view, VkFramebuffer *fb)
+{
+    VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fi.renderPass = pass;
+    fi.attachmentCount = 1;
+    fi.pAttachments = &view;
+    fi.width = gfx.width;
+    fi.height = gfx.height;
+    fi.layers = 1;
+    CHECK(vkCreateFramebuffer(gfx.device, &fi, nullptr, fb));
+    return true;
+}
+
+/* HDR10 output's targets and the UI layer's pipeline. Optional: without
+ * them the app stays SDR. */
+bool create_hdr()
+{
+    /* the UI layer: the swapchain's format, so ImGui's pipeline (made for
+     * gfx.render_pass) draws in its pass as well */
+    if (!gfx_image(gfx.width, gfx.height, gfx.format,
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &hdr.ui_image,
+                   &hdr.ui_memory, &hdr.ui_view))
+        return false;
+    if (!gfx_image(gfx.width, gfx.height, HDR_FORMAT,
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &hdr.image,
+                   &hdr.memory, &hdr.view))
+        return false;
+    if (!make_pass(gfx.format, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                   VK_ACCESS_SHADER_READ_BIT, &hdr.ui_pass) ||
+        !make_pass(HDR_FORMAT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_TRANSFER_READ_BIT, &gfx.hdr_pass) ||
+        !make_framebuffer(hdr.ui_pass, hdr.ui_view, &hdr.ui_fb) ||
+        !make_framebuffer(gfx.hdr_pass, hdr.view, &hdr.fb))
+        return false;
+
+    VkSamplerCreateInfo si = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    CHECK(vkCreateSampler(gfx.device, &si, nullptr, &hdr.sampler));
+    VkDescriptorSetLayoutBinding b = {};
+    b.binding = 0;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    b.descriptorCount = 1;
+    b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo li = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    li.bindingCount = 1;
+    li.pBindings = &b;
+    CHECK(vkCreateDescriptorSetLayout(gfx.device, &li, nullptr, &hdr.set_layout));
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+    VkDescriptorPoolCreateInfo pi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    pi.maxSets = 1;
+    pi.poolSizeCount = 1;
+    pi.pPoolSizes = &ps;
+    CHECK(vkCreateDescriptorPool(gfx.device, &pi, nullptr, &hdr.pool));
+    VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    ai.descriptorPool = hdr.pool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &hdr.set_layout;
+    CHECK(vkAllocateDescriptorSets(gfx.device, &ai, &hdr.set));
+    VkDescriptorImageInfo ii = { hdr.sampler, hdr.ui_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    w.dstSet = hdr.set;
+    w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &ii;
+    vkUpdateDescriptorSets(gfx.device, 1, &w, 0, nullptr);
+
+    VkPushConstantRange range = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float) };
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &hdr.set_layout;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &range;
+    CHECK(vkCreatePipelineLayout(gfx.device, &pl, nullptr, &hdr.layout));
+    VkShaderModule vs = gfx_shader(spv_fullscreen_vert, sizeof(spv_fullscreen_vert));
+    VkShaderModule fs = gfx_shader(spv_ui_pq_frag, sizeof(spv_ui_pq_frag));
+    VkPipelineShaderStageCreateInfo stages[2] = {};
+    stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vs;
+    stages[0].pName = "main";
+    stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fs;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vp.viewportCount = 1;
+    vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    /* premultiplied over */
+    VkPipelineColorBlendAttachmentState att = {};
+    att.blendEnable = VK_TRUE;
+    att.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    att.colorBlendOp = VK_BLEND_OP_ADD;
+    att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    att.alphaBlendOp = VK_BLEND_OP_ADD;
+    att.colorWriteMask = 0xf;
+    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1;
+    cb.pAttachments = &att;
+    VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo ds = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    ds.dynamicStateCount = 2;
+    ds.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gp = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    gp.stageCount = 2;
+    gp.pStages = stages;
+    gp.pVertexInputState = &vi;
+    gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vp;
+    gp.pRasterizationState = &rs;
+    gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &cb;
+    gp.pDynamicState = &ds;
+    gp.layout = hdr.layout;
+    gp.renderPass = gfx.hdr_pass;
+    VkResult r = vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &hdr.pipeline);
+    vkDestroyShaderModule(gfx.device, vs, nullptr);
+    vkDestroyShaderModule(gfx.device, fs, nullptr);
+    CHECK(r);
+    return true;
+}
+
+void begin(VkCommandBuffer cmd, VkRenderPass pass, VkFramebuffer fb, float alpha)
+{
+    VkClearValue clear = {};
+    clear.color = { { 0.0f, 0.0f, 0.0f, alpha } };
+    VkRenderPassBeginInfo rb = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rb.renderPass = pass;
+    rb.framebuffer = fb;
+    rb.renderArea.extent = { gfx.width, gfx.height };
+    rb.clearValueCount = 1;
+    rb.pClearValues = &clear;
+    vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+}
+
+#ifdef VLCPS5_HOST
+/* An HDR10 frame (10:10:10:2 PQ, BT.2020) in the offscreen image, made
+ * viewable for the PNG: light, SDR white at 203 nits, BT.709, gamma 2.4. */
+void hdr_preview(std::vector<uint8_t> &rgb, const uint32_t *px, size_t n)
+{
+    auto nits = [](float e) {
+        float p = powf(e, 1 / 78.84375f);
+        return 10000 * powf(fmaxf(p - 0.8359375f, 0) / (18.8515625f - 18.6875f * p), 1 / 0.1593017578125f);
+    };
+    for (size_t i = 0; i < n; i++) {
+        uint32_t v = px[i];
+        float b = nits((v & 1023) / 1023.0f) / UI_NITS, g = nits(((v >> 10) & 1023) / 1023.0f) / UI_NITS,
+              r = nits(((v >> 20) & 1023) / 1023.0f) / UI_NITS;
+        float o[3] = { 1.6605f * r - 0.5876f * g - 0.0728f * b, -0.1246f * r + 1.1329f * g - 0.0083f * b,
+                       -0.0182f * r - 0.1006f * g + 1.1187f * b };
+        for (int c = 0; c < 3; c++)
+            rgb[i * 3 + c] = (uint8_t)(powf(fminf(fmaxf(o[c], 0), 1), 1 / 2.4f) * 255 + 0.5f);
+    }
+}
+#endif
+
 #ifdef VLCPS5_HOST
 /* The offscreen image (BGRA) as an RGB PNG. */
 void save_png(const char *path)
@@ -301,7 +547,9 @@ void save_png(const char *path)
     uint32_t w = gfx.width, h = gfx.height;
     std::vector<uint8_t> rgb((size_t)w * h * 3);
     const uint8_t *src = (const uint8_t *)readback_mapped;
-    for (size_t i = 0; i < (size_t)w * h; i++) {
+    if (gfx.hdr)
+        hdr_preview(rgb, (const uint32_t *)src, (size_t)w * h);
+    for (size_t i = 0; i < (size_t)w * h && !gfx.hdr; i++) {
         rgb[i * 3] = src[i * 4 + 2];
         rgb[i * 3 + 1] = src[i * 4 + 1];
         rgb[i * 3 + 2] = src[i * 4];
@@ -334,7 +582,65 @@ bool gfx_init()
         return false;
     if (gfx.offscreen ? !create_offscreen() : !create_swapchain())
         return false;
-    return create_targets();
+    if (!create_targets())
+        return false;
+    if (!create_hdr()) {
+        fprintf(stderr, "gfx: no HDR10 output (its targets couldn't be made)\n");
+        gfx.hdr_pass = VK_NULL_HANDLE;
+    }
+    gfx.display_range = vlcps5_wsi_videoout_dynamic_range ? vlcps5_wsi_videoout_dynamic_range() : -1;
+    fprintf(stderr, "gfx: output %s, HDR10 output %s\n",
+            gfx.display_range == 2 ? "HDR" : gfx.display_range == 1 ? "SDR" : "unknown",
+            gfx.hdr_pass && (vlcps5_wsi_videoout_set_hdr || gfx.offscreen) ? "possible" : "not possible");
+    return true;
+}
+
+bool gfx_set_hdr(bool on)
+{
+    if (on == gfx.hdr)
+        return true;
+    if (on && !gfx.hdr_pass)
+        return false;
+    /* nothing drawn in one format may land after the switch */
+    vkDeviceWaitIdle(gfx.device);
+    int rc;
+    if (vlcps5_wsi_videoout_set_hdr)
+        rc = vlcps5_wsi_videoout_set_hdr(on ? 1 : 0);
+    else
+        rc = gfx.offscreen && getenv("VLCPS5_HDR_TEST") ? 0 : -1;   /* host: the preview */
+    fprintf(stderr, "gfx: HDR10 output %s: %s (%#x)\n", on ? "on" : "off", rc == 0 ? "done" : "refused",
+            (unsigned)rc);
+    if (rc != 0 && on)
+        return false;
+    /* off even if refused: SDR pixels are what is drawn from here */
+    gfx.hdr = on;
+    return true;
+}
+
+void gfx_begin_ui_pass(VkCommandBuffer cmd)
+{
+    begin(cmd, hdr.ui_pass, hdr.ui_fb, 0.0f);   /* clear: transparent */
+    pass_now = PASS_UI;
+}
+
+void gfx_begin_hdr_pass(VkCommandBuffer cmd)
+{
+    if (pass_now != PASS_NONE)
+        vkCmdEndRenderPass(cmd);
+    begin(cmd, gfx.hdr_pass, hdr.fb, 1.0f);
+    pass_now = PASS_HDR;
+}
+
+void gfx_draw_ui_layer(VkCommandBuffer cmd)
+{
+    VkViewport vp = { 0, 0, (float)gfx.width, (float)gfx.height, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { gfx.width, gfx.height } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, hdr.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, hdr.layout, 0, 1, &hdr.set, 0, nullptr);
+    vkCmdPushConstants(cmd, hdr.layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(float), &UI_NITS);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
 }
 
 void gfx_shutdown()
@@ -383,12 +689,32 @@ void gfx_begin_pass(VkCommandBuffer cmd)
     rb.clearValueCount = 1;
     rb.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    pass_now = PASS_MAIN;
 }
 
 void gfx_end_frame(VkCommandBuffer cmd)
 {
     Frame &f = frames[gfx.frame_slot];
     vkCmdEndRenderPass(cmd);
+    if (pass_now == PASS_HDR) {
+        /* the 10-bit frame into the framebuffer: same 32-bit pixels and tiling */
+        VkImage dst = images[image_index];
+        gfx_barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageCopy region = {};
+        region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        region.extent = { gfx.width, gfx.height, 1 };
+        vkCmdCopyImage(cmd, hdr.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        gfx_barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    gfx.offscreen ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT);
+    }
+    pass_now = PASS_NONE;
 #ifdef VLCPS5_HOST
     const char *shot = plat_screenshot_path(gfx.frame_number);
     if (shot) {
@@ -400,7 +726,8 @@ void gfx_end_frame(VkCommandBuffer cmd)
     }
 #endif
     vkEndCommandBuffer(cmd);
-    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    /* (the HDR10 frame reaches the framebuffer by a copy) */
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;

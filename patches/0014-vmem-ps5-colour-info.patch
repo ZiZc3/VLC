@@ -1,0 +1,16 @@
+--- a/modules/video_output/vmem.c
++++ b/modules/video_output/vmem.c
+@@ -139,6 +139,13 @@
+     video_format_t fmt;
+     video_format_ApplyRotation(&fmt, &vd->fmt);
+ 
++    /* VLC-PS5: the picture's colours (HDR transfer, primaries, matrix,
++     * light levels), which the setup callback doesn't carry */
++    void (*colour)(void *, const video_format_t *) =
++        var_InheritAddress(vd, "vmem-colour");
++    if (colour != NULL)
++        colour(sys->opaque, &fmt);
++
+     if (setup != NULL) {
+         char chroma[5];
+ 

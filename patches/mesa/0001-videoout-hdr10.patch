@@ -1,0 +1,104 @@
+--- a/src/vulkan/wsi/wsi_common_videoout.c
++++ b/src/vulkan/wsi/wsi_common_videoout.c
+@@ -146,8 +146,46 @@
+ {
+    return -1;
+ }
++
++static int
++sceVideoOutSubmitChangeBufferAttribute2(int32_t handle, int32_t set, const void *attribute, const void *option)
++{
++   return 0;
++}
++
++struct ps5_video_out_output_status {
++   uint32_t resolution;
++   uint32_t dynamic_range;
++   uint64_t refresh_rate;
++   uint64_t flags;
++   uint64_t reserved[3];
++};
++
++static int
++sceVideoOutGetOutputStatus(int32_t handle, struct ps5_video_out_output_status *status)
++{
++   memset(status, 0, sizeof(*status));
++   status->dynamic_range = 1;
++   return 0;
++}
++#else
++/* VLC-PS5: VideoOut calls ps5platform/videoout.h doesn't declare. */
++struct ps5_video_out_output_status {
++   uint32_t resolution;
++   uint32_t dynamic_range; /* 0 unknown, 1 SDR, 2 HDR */
++   uint64_t refresh_rate;
++   uint64_t flags;         /* bit 0: HDR output active */
++   uint64_t reserved[3];
++};
++int sceVideoOutSubmitChangeBufferAttribute2(int32_t handle, int32_t set, const void *attribute,
++                                            const void *option);
++int sceVideoOutGetOutputStatus(int32_t handle, struct ps5_video_out_output_status *status);
+ #endif
+ 
++/* VLC-PS5: HDR10 scanout, 10:10:10:2 in the framebuffers' B,G,R order with
++ * BT.2020 primaries and the PQ curve. */
++#define VLCPS5_VIDEO_OUT_PIXEL_FORMAT_HDR10 UINT64_C(0x8100070400000000)
++
+ /* The display and its modes: one each per process, as VideoOut is. */
+ struct wsi_videoout_mode {
+    uint32_t refresh_millihertz;
+@@ -399,6 +437,54 @@
+    return VK_SUCCESS;
+ }
+ 
++/*
++ * VLC-PS5: HDR10 output. The framebuffers stay registered and are retyped in
++ * place (registering them again isn't possible while one is on screen); the
++ * new type applies from the next flip. The app waits for its GPU work to end
++ * first and from then on writes 10:10:10:2 PQ pixels into the same 32-bit
++ * buffers. 0 when VideoOut took it.
++ */
++int vlcps5_wsi_videoout_set_hdr(int enable);
++int vlcps5_wsi_videoout_dynamic_range(void);
++
++int
++vlcps5_wsi_videoout_set_hdr(int enable)
++{
++   struct wsi_videoout_output *out = &videoout_output;
++   mtx_lock(&out->lock);
++   int result = -1;
++   if (out->buffers) {
++      uint8_t attribute[PS5_VIDEO_OUT_ATTRIBUTE_BYTES] = {0};
++      sceVideoOutSetBufferAttribute2(attribute,
++                                     enable ? VLCPS5_VIDEO_OUT_PIXEL_FORMAT_HDR10
++                                            : PS5_VIDEO_OUT_PIXEL_FORMAT_B8G8R8A8_SDR,
++                                     PS5_VIDEO_OUT_TILING_64KB_R_X, VIDEOOUT_WIDTH, VIDEOOUT_HEIGHT, 0, 0, 0);
++      result = sceVideoOutSubmitChangeBufferAttribute2(out->handle, 0, attribute, NULL);
++   }
++   mtx_unlock(&out->lock);
++   fprintf(stderr, "wsi/videoout: framebuffers %s: 0x%08x\n", enable ? "HDR10" : "SDR", (unsigned)result);
++   return result;
++}
++
++/* VLC-PS5: what the output carries: 1 SDR, 2 HDR, 0 unknown, negative: no answer. */
++int
++vlcps5_wsi_videoout_dynamic_range(void)
++{
++   struct wsi_videoout_output *out = &videoout_output;
++   mtx_lock(&out->lock);
++   int result = -1;
++   if (videoout_open_locked()) {
++      struct ps5_video_out_output_status status;
++      memset(&status, 0, sizeof(status));
++      int rc = sceVideoOutGetOutputStatus(out->handle, &status);
++      result = rc == 0 ? (int)status.dynamic_range : -1;
++      fprintf(stderr, "wsi/videoout: output status 0x%08x: range %u, flags 0x%" PRIx64 "\n", (unsigned)rc,
++              status.dynamic_range, status.flags);
++   }
++   mtx_unlock(&out->lock);
++   return result;
++}
++
+ static int64_t
+ videoout_shown_argument_locked(void)
+ {

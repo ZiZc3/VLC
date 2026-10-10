@@ -31,12 +31,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <thread>
+#include <unistd.h>
 
 #include <vlc/vlc.h>
 /* libvlc's player is a VLC object; a few options have no libvlc call (the
  * subtitle look, Auto deinterlace), so they're set as its variables, which
  * its video output and subtitle renderer inherit. */
 #include <vlc_common.h>
+#include <vlc_es.h>
 #include <vlc_variables.h>
 #include <vlc_url.h>
 #include <vlc_stream.h>
@@ -68,6 +70,14 @@ std::atomic<bool> info_stale{ false };
 DecodeMode decode_mode = DECODE_AUTO;
 bool fast_now;             /* the current file was opened with fast decoding */
 std::string fast_path;     /* the file Auto switched, so a reopen keeps it */
+/* Hardware decoding (ps5/modules/ps5vdec.c): settings.txt hw_decode=0 turns
+ * it off; a video the console's decoder gave up on reopens with FFmpeg. */
+std::atomic<bool> vdec_failed{ false };
+std::atomic<int> vdec_active{ 0 };   /* decoders open on the console's decoder */
+/* how long a video takes to show its first picture (the log) */
+double opened_at;
+bool first_picture_wait;
+std::string software_path;
 struct Health {
     double next;           /* next check (plat_time) */
     int bad_seconds;
@@ -127,12 +137,32 @@ struct Slot {
     uint64_t gpu_frame; /* the frame whose fence frees it */
 };
 
+/* A picture's colours, from VLC just before vmem's setup (patches/0014).
+ * HDR (PQ or HLG, mostly BT.2020) is turned into SDR in the shader: its
+ * brightness brought down to what a TV shows as white (tone mapping), its
+ * colours brought into BT.709's. */
+enum Transfer { TRC_SDR, TRC_PQ, TRC_HLG };
+enum Matrix { MATRIX_AUTO, MATRIX_601, MATRIX_709, MATRIX_2020 };
+struct Colour {
+    int transfer = TRC_SDR;
+    int matrix = MATRIX_AUTO;  /* YCbCr to RGB; AUTO: 709 for HD, 601 below */
+    bool wide = false;         /* BT.2020 primaries */
+    float peak = 1000;         /* the picture's brightest, in nits (HDR) */
+    bool full_range = false;   /* 0-255 (VLC says so; NV12 has no "J" name) */
+};
+/* HDR's reference white (BT.2408): what shows as the TV's white in SDR */
+const float SDR_WHITE = 203;
+
 struct Format {
     uint32_t width, height;        /* buffer size, as VLC writes it */
     uint32_t pitches[PLANES], lines[PLANES];
     VkDeviceSize offsets[PLANES];
     VkDeviceSize size;
     bool ten_bit, full_range;
+    /* NV12 / P010 (the console's hardware decoder): Y, then U and V
+     * interleaved in one plane; P010 keeps its 10 bits at the top */
+    bool two_planes;
+    Colour colour;
 };
 
 std::mutex pic_lock;
@@ -140,6 +170,7 @@ std::condition_variable pic_freed;
 Slot slots[SLOTS];
 Format format;
 int generation;        /* bumped by every vmem setup */
+Colour next_colour;    /* vmem_colour's, for the setup right after it */
 int shown = -1;        /* the slot VLC displayed last, not uploaded yet */
 std::atomic<uint64_t> completed_frame{ 0 };
 
@@ -158,7 +189,8 @@ struct Planes {
     uint32_t w[PLANES], h[PLANES];
     int generation = -1;
     bool has_picture;
-    bool ten_bit, full_range;
+    bool ten_bit, full_range, two_planes;
+    Colour colour;
     uint32_t buf_w, buf_h;
 } planes;
 
@@ -168,6 +200,7 @@ VkDescriptorPool desc_pool;
 VkDescriptorSet desc_set;
 VkPipelineLayout pipe_layout;
 VkPipeline pipeline;
+VkPipeline pipeline_hdr;   /* in gfx.hdr_pass (HDR10 output) */
 
 struct Push {
     float row0[4], row1[4], row2[4];
@@ -177,6 +210,8 @@ struct Push {
     float adjust[4];   /* brightness, contrast, saturation, gamma exponent */
     float view[4];     /* 360°: yaw, pitch (radians), tan(fov / 2), screen aspect */
     float xform[4];    /* quarter turns clockwise, mirror, upside down, sharpen */
+    float hdr[4];      /* transfer (Transfer), peak (nits), BT.2020 primaries (1), NV12/P010 (1) */
+    float outp[4];     /* HDR10 output (1): PQ, BT.2020 into gfx.hdr_pass's 10-bit frame */
 };
 
 /* where a 360° video is looked at */
@@ -192,23 +227,155 @@ uint32_t align_up(uint32_t v, uint32_t a)
 
 void free_slots_locked(uint64_t after_frame)
 {
+    /* A buffer no copy reads (never drawn, or its last copy finished) goes
+     * now: when VLC fails to start a video it sets up again and again, and
+     * 4K buffers left for later piled up until the memory ran out (#9). */
+    uint64_t done = completed_frame.load();
     for (Slot &s : slots) {
-        if (s.buffer)
+        if (s.buffer && s.state != GPU && s.gpu_frame <= done) {
+            vkDestroyBuffer(gfx.device, s.buffer, nullptr);
+            vkFreeMemory(gfx.device, s.memory, nullptr);
+        } else if (s.buffer) {
             garbage.push_back({ s.buffer, s.memory, after_frame });
+        }
         s = Slot{};
     }
     shown = -1;
+}
+
+/* VLC's picture format just before setup (patches/0014): its colours. */
+void vmem_colour(void *opaque, const video_format_t *fmt)
+{
+    (void)opaque;
+    Colour c;
+    if (fmt->transfer == TRANSFER_FUNC_SMPTE_ST2084)
+        c.transfer = TRC_PQ;
+    else if (fmt->transfer == TRANSFER_FUNC_HLG)
+        c.transfer = TRC_HLG;
+    switch (fmt->space) {
+    case COLOR_SPACE_BT601: c.matrix = MATRIX_601; break;
+    case COLOR_SPACE_BT709: c.matrix = MATRIX_709; break;
+    case COLOR_SPACE_BT2020: c.matrix = MATRIX_2020; break;
+    default: c.matrix = c.transfer != TRC_SDR ? MATRIX_2020 : MATRIX_AUTO; break;
+    }
+    c.full_range = fmt->b_color_range_full;
+    c.wide = fmt->primaries == COLOR_PRIMARIES_BT2020 ||
+             (fmt->primaries == COLOR_PRIMARIES_UNDEF && c.transfer != TRC_SDR);
+    /* How bright it gets: the content's own light level, else the mastering
+     * display's (in 1/10000 nits), else 1000 nits, the usual grade; HLG is
+     * made for a 1000-nit TV. */
+    if (c.transfer == TRC_PQ) {
+        if (fmt->lighting.MaxCLL >= 100)
+            c.peak = fmt->lighting.MaxCLL;
+        else if (fmt->mastering.max_luminance >= 100 * 10000)
+            c.peak = fmt->mastering.max_luminance / 10000.0f;
+        c.peak = std::min(c.peak, 10000.0f);
+    }
+    fprintf(stderr, "player: colours: transfer %d primaries %d matrix %d%s; MaxCLL %u, mastering %u nits%s\n",
+            (int)fmt->transfer, (int)fmt->primaries, (int)fmt->space,
+            fmt->b_color_range_full ? " full range" : "", (unsigned)fmt->lighting.MaxCLL,
+            (unsigned)(fmt->mastering.max_luminance / 10000),
+            c.transfer == TRC_PQ ? " -> HDR10, tone mapped" : c.transfer == TRC_HLG ? " -> HLG, tone mapped" : "");
+    std::lock_guard<std::mutex> g(pic_lock);
+    next_colour = c;
+}
+
+/* ---- colour sums (the shader's, on the CPU for screenshots) ---------------- */
+
+struct YuvMatrix { float kr, kgu, kgv, kb; };
+
+YuvMatrix yuv_matrix(int matrix, uint32_t visible_h)
+{
+    if (matrix == MATRIX_AUTO)
+        matrix = visible_h >= 720 ? MATRIX_709 : MATRIX_601;
+    if (matrix == MATRIX_2020)
+        return { 1.4746f, -0.16455f, -0.57135f, 1.8814f };
+    if (matrix == MATRIX_709)
+        return { 1.5748f, -0.1873f, -0.4681f, 1.8556f };
+    return { 1.402f, -0.344136f, -0.714136f, 1.772f };
+}
+
+/* SMPTE ST 2084 (PQ): signal <-> nits */
+const float PQ_M1 = 0.1593017578125f, PQ_M2 = 78.84375f;
+const float PQ_C1 = 0.8359375f, PQ_C2 = 18.8515625f, PQ_C3 = 18.6875f;
+
+float pq_to_nits(float e)
+{
+    float p = powf(std::clamp(e, 0.0f, 1.0f), 1 / PQ_M2);
+    return 10000 * powf(std::max(p - PQ_C1, 0.0f) / (PQ_C2 - PQ_C3 * p), 1 / PQ_M1);
+}
+
+float nits_to_pq(float nits)
+{
+    float y = powf(std::clamp(nits / 10000, 0.0f, 1.0f), PQ_M1);
+    return powf((PQ_C1 + PQ_C2 * y) / (1 + PQ_C3 * y), PQ_M2);
+}
+
+/* rgb: the picture's signal (0..1) -> what an SDR TV should get (0..1) */
+void hdr_to_sdr(float rgb[3], const Colour &c)
+{
+    float nits[3];
+    if (c.transfer == TRC_PQ) {
+        for (int i = 0; i < 3; i++)
+            nits[i] = pq_to_nits(rgb[i]);
+    } else {
+        /* HLG: scene light, then the system gamma of a 1000-nit TV (BT.2100) */
+        const float a = 0.17883277f, b = 0.28466892f, k = 0.55991073f;
+        float s[3];
+        for (int i = 0; i < 3; i++) {
+            float e = std::clamp(rgb[i], 0.0f, 1.0f);
+            s[i] = e <= 0.5f ? e * e / 3 : (expf((e - k) / a) + b) / 12;
+        }
+        float ys = std::max(0.2627f * s[0] + 0.6780f * s[1] + 0.0593f * s[2], 1e-6f);
+        for (int i = 0; i < 3; i++)
+            nits[i] = 1000 * powf(ys, 0.2f) * s[i];
+    }
+    /* BT.2390's roll-off on the brightest channel (keeps the hue): up to
+     * about half of SDR white nothing changes, above it the highlights bend
+     * down to fit under white. */
+    float peak = c.transfer == TRC_PQ ? c.peak : 1000;
+    float sig = std::max(nits[0], std::max(nits[1], nits[2]));
+    if (sig > 0 && peak > SDR_WHITE) {
+        float src = nits_to_pq(peak);
+        float e1 = std::min(nits_to_pq(sig) / src, 1.0f);
+        float maxl = nits_to_pq(SDR_WHITE) / src;
+        float ks = 1.5f * maxl - 0.5f, e2 = e1;
+        if (e1 > ks) {
+            float t = (e1 - ks) / (1 - ks), t2 = t * t, t3 = t2 * t;
+            e2 = (2 * t3 - 3 * t2 + 1) * ks + (t3 - 2 * t2 + t) * (1 - ks) + (-2 * t3 + 3 * t2) * maxl;
+        }
+        float scale = pq_to_nits(e2 * src) / sig;
+        for (int i = 0; i < 3; i++)
+            nits[i] *= scale;
+    }
+    float lin[3] = { nits[0] / SDR_WHITE, nits[1] / SDR_WHITE, nits[2] / SDR_WHITE };
+    if (c.wide) {
+        /* BT.2020 -> BT.709 primaries (linear light) */
+        float r = 1.6605f * lin[0] - 0.5876f * lin[1] - 0.0728f * lin[2];
+        float g = -0.1246f * lin[0] + 1.1329f * lin[1] - 0.0083f * lin[2];
+        float b = -0.0182f * lin[0] - 0.1006f * lin[1] + 1.1187f * lin[2];
+        lin[0] = r; lin[1] = g; lin[2] = b;
+    }
+    /* back to a TV's signal (BT.1886, gamma 2.4) */
+    for (int i = 0; i < 3; i++)
+        rgb[i] = powf(std::clamp(lin[i], 0.0f, 1.0f), 1 / 2.4f);
 }
 
 unsigned vmem_setup(void **opaque, char *chroma, unsigned *width, unsigned *height,
                     unsigned *pitches, unsigned *lines)
 {
     (void)opaque;
-    bool ten = !strncmp(chroma, "I0A", 3) || !strncmp(chroma, "P010", 4) ||
-               !strncmp(chroma, "I2A", 3) || !strncmp(chroma, "I4A", 3);
+    /* The hardware decoder's NV12 / P010 are taken as they are (the shader
+     * reads the interleaved chroma), everything else as planar 4:2:0.
+     * VLCPS5_TWO_PLANES=1 (host tests) asks for NV12 / P010 from any decoder. */
+    static const bool force_two = getenv("VLCPS5_TWO_PLANES") != nullptr;
+    bool nv12 = !strncmp(chroma, "NV12", 4), p010 = !strncmp(chroma, "P010", 4);
+    bool ten = p010 || !strncmp(chroma, "I0A", 3) || !strncmp(chroma, "I2A", 3) ||
+               !strncmp(chroma, "I4A", 3);
     bool full = !strncmp(chroma, "J4", 2);
+    bool two = nv12 || p010 || force_two;
     fprintf(stderr, "player: VLC offers %.4s %ux%u\n", chroma, *width, *height);
-    memcpy(chroma, ten ? "I0AL" : full ? "J420" : "I420", 4);
+    memcpy(chroma, two ? (ten ? "P010" : "NV12") : ten ? "I0AL" : full ? "J420" : "I420", 4);
 
     std::lock_guard<std::mutex> g(pic_lock);
     free_slots_locked(gfx.frame_number + GFX_FRAMES + 1);
@@ -216,14 +383,19 @@ unsigned vmem_setup(void **opaque, char *chroma, unsigned *width, unsigned *heig
     f.width = *width;
     f.height = *height;
     f.ten_bit = ten;
-    f.full_range = full;
+    f.two_planes = two;
+    f.colour = next_colour;
+    f.full_range = full || f.colour.full_range;
+    next_colour = Colour{};
     uint32_t bpp = ten ? 2 : 1;
     uint32_t cw = (*width + 1) / 2, ch = (*height + 1) / 2;
     /* Rows on 256-byte boundaries: what buffer-to-image copies like best. */
     f.pitches[0] = align_up(*width * bpp, 256);
     f.lines[0] = align_up(*height, 16);
-    f.pitches[1] = f.pitches[2] = align_up(cw * bpp, 256);
+    f.pitches[1] = f.pitches[2] = align_up(cw * bpp * (two ? 2 : 1), 256);
     f.lines[1] = f.lines[2] = align_up(ch, 16);
+    if (two)
+        f.pitches[2] = f.lines[2] = 0;
     VkDeviceSize off = 0;
     for (int i = 0; i < PLANES; i++) {
         f.offsets[i] = off;
@@ -247,8 +419,9 @@ unsigned vmem_setup(void **opaque, char *chroma, unsigned *width, unsigned *heig
     format = f;
     info_stale = true;
     generation++;
-    fprintf(stderr, "player: pictures %ux%u %s%s, %d x %llu KiB\n", f.width, f.height,
-            ten ? "10-bit" : "8-bit", full ? " full range" : "", SLOTS,
+    fprintf(stderr, "player: pictures %ux%u %s%s%s, %d x %llu KiB\n", f.width, f.height,
+            ten ? "10-bit" : "8-bit", two ? (ten ? " P010" : " NV12") : "",
+            f.full_range ? " full range" : "", SLOTS,
             (unsigned long long)(f.size / 1024));
     return SLOTS;
 }
@@ -332,6 +505,10 @@ void vmem_display(void *opaque, void *picture)
         slots[shown].state = FREE; /* never drawn: the screen was slower */
     slots[i].state = SHOWN;
     shown = i;
+    if (first_picture_wait) {
+        first_picture_wait = false;
+        fprintf(stderr, "player: first picture %.2f s after the open\n", plat_time() - opened_at);
+    }
 }
 
 /* ---- sound ------------------------------------------------------------------- */
@@ -383,6 +560,8 @@ int amem_setup(void **opaque, char *format, unsigned *rate, unsigned *channels)
 
 /* True while a stop runs in the background: what VLC still sends is dropped. */
 std::atomic<bool> stopping;
+/* A video opened while the one before was still stopping: started after. */
+libvlc_media_t *queued_media;
 
 void amem_play(void *opaque, const void *samples, unsigned count, int64_t pts)
 {
@@ -623,6 +802,8 @@ void read_info()
     }
     std::lock_guard<std::mutex> g(pic_lock);
     v.ten_bit = format.ten_bit;
+    v.hdr = format.colour.transfer;
+    v.hardware = vdec_active > 0;
     info = v;
 }
 
@@ -731,6 +912,12 @@ bool create_pipeline()
     gp.layout = pipe_layout;
     gp.renderPass = gfx.render_pass;
     VkResult r = vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline);
+    /* the same for HDR10 output's 10-bit frame */
+    if (r == VK_SUCCESS && gfx.hdr_pass) {
+        gp.renderPass = gfx.hdr_pass;
+        if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_hdr) != VK_SUCCESS)
+            pipeline_hdr = VK_NULL_HANDLE;
+    }
     vkDestroyShaderModule(gfx.device, vs, nullptr);
     vkDestroyShaderModule(gfx.device, fs, nullptr);
     return r == VK_SUCCESS;
@@ -757,11 +944,16 @@ bool make_planes(const Format &f)
     vkDeviceWaitIdle(gfx.device); /* the old textures may still be read */
     destroy_planes();
     VkFormat vf = f.ten_bit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+    VkFormat vf2 = f.ten_bit ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM;
     VkCommandBuffer cmd = gfx_one_shot_begin();
     for (int i = 0; i < PLANES; i++) {
         planes.w[i] = i ? (f.width + 1) / 2 : f.width;
         planes.h[i] = i ? (f.height + 1) / 2 : f.height;
-        if (!gfx_image(planes.w[i], planes.h[i], vf,
+        /* two planes: the second holds U and V; the third, unused, is a
+         * dot the shader's binding still needs */
+        if (f.two_planes && i == 2)
+            planes.w[i] = planes.h[i] = 1;
+        if (!gfx_image(planes.w[i], planes.h[i], f.two_planes && i == 1 ? vf2 : vf,
                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                        &planes.image[i], &planes.memory[i], &planes.view[i])) {
             gfx_one_shot_end(cmd);
@@ -786,6 +978,7 @@ bool make_planes(const Format &f)
     vkUpdateDescriptorSets(gfx.device, PLANES, w, 0, nullptr);
     planes.ten_bit = f.ten_bit;
     planes.full_range = f.full_range;
+    planes.two_planes = f.two_planes;
     planes.buf_w = f.width;
     planes.buf_h = f.height;
     planes.has_picture = false;
@@ -948,7 +1141,7 @@ double chapters_tried;
 int chapters_title = -2; /* a disc's chapters belong to its current title */
 
 /* A slot's picture as RGB, cropped to what's visible: the shader's sums on
- * the CPU (BT.709 for HD, 601 below). */
+ * the CPU (its matrix, HDR tone mapped to SDR). */
 struct Shot {
     std::vector<uint8_t> data;
     Format f;
@@ -959,23 +1152,33 @@ struct Shot {
 void shot_main(Shot shot)
 {
     const Format &f = shot.f;
-    bool hd = shot.h >= 720;
-    float kr = hd ? 1.5748f : 1.402f, kgu = hd ? -0.1873f : -0.344136f,
-          kgv = hd ? -0.4681f : -0.714136f, kb = hd ? 1.8556f : 1.772f;
+    YuvMatrix m = yuv_matrix(f.colour.matrix, shot.h);
+    bool hdr = f.colour.transfer != TRC_SDR;
     std::vector<uint8_t> rgb((size_t)shot.w * shot.h * 3);
+    /* P010's 10 bits sit at the top of 16, I0AL's at the bottom */
+    float ten_max = f.two_planes ? 65535.0f : 1023.0f;
     auto sample = [&](int plane, uint32_t x, uint32_t y) {
         const uint8_t *row = shot.data.data() + f.offsets[plane] + (size_t)y * f.pitches[plane];
-        return f.ten_bit ? ((const uint16_t *)row)[x] / 1023.0f : row[x] / 255.0f;
+        return f.ten_bit ? ((const uint16_t *)row)[x] / ten_max : row[x] / 255.0f;
     };
     for (uint32_t y = 0; y < shot.h; y++)
         for (uint32_t x = 0; x < shot.w; x++) {
-            float Y = sample(0, x, y), U = sample(1, x / 2, y / 2) - 0.5f, V = sample(2, x / 2, y / 2) - 0.5f;
+            float Y = sample(0, x, y), U, V;
+            if (f.two_planes) {
+                U = sample(1, x / 2 * 2, y / 2) - 0.5f;
+                V = sample(1, x / 2 * 2 + 1, y / 2) - 0.5f;
+            } else {
+                U = sample(1, x / 2, y / 2) - 0.5f;
+                V = sample(2, x / 2, y / 2) - 0.5f;
+            }
             if (!f.full_range) {
                 Y = (Y - 16.0f / 255) * (255.0f / 219);
                 U *= 255.0f / 224;
                 V *= 255.0f / 224;
             }
-            float c[3] = { Y + kr * V, Y + kgu * U + kgv * V, Y + kb * U };
+            float c[3] = { Y + m.kr * V, Y + m.kgu * U + m.kgv * V, Y + m.kb * U };
+            if (hdr)
+                hdr_to_sdr(c, f.colour);
             uint8_t *o = &rgb[((size_t)y * shot.w + x) * 3];
             for (int i = 0; i < 3; i++)
                 o[i] = (uint8_t)(c[i] < 0 ? 0 : c[i] > 1 ? 255 : c[i] * 255 + 0.5f);
@@ -985,6 +1188,138 @@ void shot_main(Shot shot)
 }
 
 } // namespace
+
+/* Picture copies split across a few threads (ps5vdec's out of the decoder,
+ * vmem's into our buffers, patches/0016). A 4K 10-bit picture is 25 MiB; one
+ * core copying it twice made 4K miss its frames on the console. */
+namespace {
+const int COPY_THREADS = 4;
+struct CopyJob {
+    uint8_t *dst;
+    const uint8_t *src;
+    size_t dst_pitch, src_pitch, bytes;
+    unsigned rows;
+    unsigned shift;   /* 16-bit samples moved up this many bits (10-bit at the bottom -> P010) */
+    uint8_t *dst2;    /* split: interleaved 16-bit U,V -> dst (U) and dst2 (V) */
+    size_t dst2_pitch;
+};
+struct CopyPool {
+    std::mutex lock;
+    std::condition_variable start, done;
+    CopyJob job;
+    unsigned serial, finished;
+    bool started;
+    std::mutex use;   /* one picture at a time */
+};
+/* Never destroyed: its threads wait on it to the end, and destroying a
+ * condition variable they wait on hung the exit (host runs, glibc). */
+CopyPool &copy_pool = *new CopyPool();
+
+void copy_rows(const CopyJob &j, int part, int parts)
+{
+    unsigned from = j.rows * part / parts, to = j.rows * (part + 1) / parts;
+    for (unsigned r = from; r < to; r++) {
+        if (j.dst2) {
+            uint16_t *u = (uint16_t *)(j.dst + r * j.dst_pitch);
+            uint16_t *v = (uint16_t *)(j.dst2 + r * j.dst2_pitch);
+            const uint16_t *s = (const uint16_t *)(j.src + r * j.src_pitch);
+            for (size_t i = 0; i < j.bytes / 4; i++) {
+                u[i] = s[2 * i];
+                v[i] = s[2 * i + 1];
+            }
+            continue;
+        }
+        if (!j.shift) {
+            memcpy(j.dst + r * j.dst_pitch, j.src + r * j.src_pitch, j.bytes);
+            continue;
+        }
+        uint16_t *d = (uint16_t *)(j.dst + r * j.dst_pitch);
+        const uint16_t *s = (const uint16_t *)(j.src + r * j.src_pitch);
+        for (size_t i = 0; i < j.bytes / 2; i++)
+            d[i] = (uint16_t)(s[i] << j.shift);
+    }
+}
+
+void copy_worker(int part)
+{
+    unsigned seen = 0;
+    for (;;) {
+        CopyJob j;
+        {
+            std::unique_lock<std::mutex> g(copy_pool.lock);
+            copy_pool.start.wait(g, [&] { return copy_pool.serial != seen; });
+            seen = copy_pool.serial;
+            j = copy_pool.job;
+        }
+        copy_rows(j, part, COPY_THREADS);
+        std::lock_guard<std::mutex> g(copy_pool.lock);
+        if (++copy_pool.finished == COPY_THREADS - 1)
+            copy_pool.done.notify_one();
+    }
+}
+} // namespace
+
+static void copy_run(const CopyJob &j);
+
+extern "C" void vlc_ps5_copy_plane_shift(uint8_t *dst, size_t dst_pitch, const uint8_t *src,
+                                         size_t src_pitch, size_t bytes, unsigned rows,
+                                         unsigned shift)
+{
+    copy_run({ dst, src, dst_pitch, src_pitch, bytes, rows, shift, nullptr, 0 });
+}
+
+/* Interleaved 16-bit chroma (U,V,U,V...) into two planes: the console's
+ * decoder's 10-bit NV12-style output as VLC's planar I0AL, which VLC can draw
+ * subtitles onto (onto P010 it can't). bytes: of each source row. */
+extern "C" void vlc_ps5_split_plane16(uint8_t *dst_u, size_t u_pitch, uint8_t *dst_v, size_t v_pitch,
+                                      const uint8_t *src, size_t src_pitch, size_t bytes,
+                                      unsigned rows)
+{
+    copy_run({ dst_u, src, u_pitch, src_pitch, bytes, rows, 0, dst_v, v_pitch });
+}
+
+static void copy_run(const CopyJob &j)
+{
+    size_t rows = j.rows, bytes = j.bytes;
+    if (rows * bytes < (1u << 20)) {   /* small: not worth waking anyone */
+        copy_rows(j, 0, 1);
+        return;
+    }
+    std::lock_guard<std::mutex> use(copy_pool.use);
+    {
+        std::lock_guard<std::mutex> g(copy_pool.lock);
+        if (!copy_pool.started) {
+            for (int i = 1; i < COPY_THREADS; i++)
+                std::thread(copy_worker, i).detach();
+            copy_pool.started = true;
+        }
+        copy_pool.job = j;
+        copy_pool.finished = 0;
+        copy_pool.serial++;
+    }
+    copy_pool.start.notify_all();
+    copy_rows(j, 0, COPY_THREADS);   /* this thread does the first part */
+    std::unique_lock<std::mutex> g(copy_pool.lock);
+    copy_pool.done.wait(g, [] { return copy_pool.finished == COPY_THREADS - 1; });
+}
+
+extern "C" void vlc_ps5_copy_plane(uint8_t *dst, size_t dst_pitch, const uint8_t *src,
+                                   size_t src_pitch, size_t bytes, unsigned rows)
+{
+    vlc_ps5_copy_plane_shift(dst, dst_pitch, src, src_pitch, bytes, rows, 0);
+}
+
+/* ps5/modules/ps5vdec.c, from VLC's decoder thread */
+extern "C" void vlc_ps5_vdec_failed(void)
+{
+    vdec_failed = true;
+}
+
+extern "C" void vlc_ps5_vdec_active(int on)
+{
+    vdec_active += on ? 1 : -1;
+    info_stale = true;
+}
 
 bool player_init()
 {
@@ -1050,6 +1385,8 @@ bool player_init()
     fprintf(stderr, "player: callbacks\n");
     libvlc_video_set_callbacks(mp, vmem_lock, vmem_unlock, vmem_display, nullptr);
     libvlc_video_set_format_callbacks(mp, vmem_setup, vmem_cleanup);
+    var_Create(mp_object(), "vmem-colour", VLC_VAR_ADDRESS);
+    var_SetAddress(mp_object(), "vmem-colour", (void *)vmem_colour);
     libvlc_audio_set_callbacks(mp, amem_play, amem_pause, amem_resume, amem_flush, amem_drain,
                                nullptr);
     libvlc_audio_set_volume_callback(mp, amem_volume);
@@ -1088,11 +1425,19 @@ static void wait_for_stop()
 
 static void stop_in_background()
 {
+    /* already stopping: nothing new can have started since (an open waits
+     * for the stop), and waiting for it here froze the app */
+    if (stopping)
+        return;
     wait_for_stop();
     if (mp) {
         libvlc_media_player_t *p = mp;
         stopping = true;
         stopper = std::thread([p] {
+            /* host tests: VLCPS5_SLOW_STOP=<ms> plays a stop stuck on a
+             * network stream (the console's 9 s, run 12) */
+            if (const char *slow = getenv("VLCPS5_SLOW_STOP"))
+                usleep(atoi(slow) * 1000);
             libvlc_media_player_stop(p);
             stopping = false;
         });
@@ -1428,6 +1773,8 @@ void side_subs_apply()
     }
 }
 
+static bool start_queued();
+
 bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms,
                        const std::vector<std::string> &options)
 {
@@ -1505,11 +1852,9 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
         libvlc_media_add_option(m, ":avcodec-skiploopfilter=4");
         libvlc_media_add_option(m, ":avcodec-fast");
     }
-    wait_for_stop();
-    libvlc_media_player_set_media(mp, m);
-    if (last_media)
-        libvlc_media_release(last_media);
-    last_media = m; /* our reference: kept for a live pause */
+    bool software = path == software_path || setting_int("hw_decode", 1) == 0;
+    if (software)
+        libvlc_media_add_option(m, ":no-ps5vdec");
     live_paused = false;
     pause_wanted = -1;
     info = VideoInfo{};
@@ -1520,8 +1865,42 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
      * and buffers first (run 19: one false "can't keep up" right after it). */
     health.next = plat_time() + (start_ms > 0 ? 5 : 3);
     debug_last = libvlc_media_stats_t{};
-    fprintf(stderr, "player: open %s at %lld ms%s\n", path.c_str(), (long long)start_ms,
-            fast_now ? " (fast decoding)" : "");
+    fprintf(stderr, "player: open %s at %lld ms%s%s\n", path.c_str(), (long long)start_ms,
+            fast_now ? " (fast decoding)" : "", software ? " (software decoding)" : "");
+    /* The video before may still be stopping: a stream stuck on its network
+     * kept VLC's stop waiting 9 s, and waiting for it here froze the whole
+     * app (console run 12). This one then starts from player_tick once the
+     * stop is done. */
+    if (queued_media)
+        libvlc_media_release(queued_media);
+    queued_media = m;
+    if (stopping) {
+        fprintf(stderr, "player: the video before is still stopping: this one starts after\n");
+        return true;
+    }
+    return start_queued();
+}
+
+/* The video player_open_media queued, into VLC (once no stop is running). */
+static bool start_queued()
+{
+    libvlc_media_t *m = queued_media;
+    if (!m)
+        return false;
+    queued_media = nullptr;
+    wait_for_stop();
+    libvlc_media_player_set_media(mp, m);
+    if (last_media)
+        libvlc_media_release(last_media);
+    last_media = m; /* our reference: kept for a live pause */
+    {
+        std::lock_guard<std::mutex> g(pic_lock);
+        opened_at = plat_time();
+        first_picture_wait = true;
+    }
+    /* the health check counts from the real start, not the queueing */
+    if (health.next < plat_time() + 3)
+        health.next = plat_time() + 3;
     return libvlc_media_player_play(mp) == 0;
 }
 
@@ -1566,6 +1945,11 @@ PlayerEvent player_tick()
     for (const PendingSub &p : done)
         if (mp && p.serial == side.serial)
             add_ready_subtitle(p.path, p.ready);
+    /* a video waiting for the one before to finish stopping */
+    if (queued_media && !stopping) {
+        fprintf(stderr, "player: the video before stopped: starting %s\n", current_path.c_str());
+        start_queued();
+    }
     if (!mp || t < health.next)
         return PLAYER_EVENT_NONE;
     health.next = t + 1;
@@ -1610,6 +1994,22 @@ PlayerEvent player_tick()
         libvlc_video_set_spu_delay(mp, kept.spu_delay * 1000);
         restore_delays = false;
     }
+    if (vdec_failed.exchange(false) && !current_path.empty()) {
+        /* the console's decoder gave up on this video: FFmpeg, same place */
+        fprintf(stderr, "player: reopening %s without hardware decoding\n", current_path.c_str());
+        restore_audio = libvlc_audio_get_track(mp);
+        restore_spu = libvlc_video_get_spu(mp);
+        software_path = current_path;
+        int64_t at = libvlc_media_player_get_time(mp);
+        std::string path = current_path;
+        libvlc_media_player_stop(mp);
+        {
+            std::lock_guard<std::mutex> g(audio_lock);
+            audio_clear_locked();
+        }
+        player_open(path, at > 0 ? at : 0);
+        return PLAYER_EVENT_NONE;
+    }
     libvlc_media_stats_t s;
     if (!get_stats(&s))
         return PLAYER_EVENT_NONE;
@@ -1641,7 +2041,8 @@ PlayerEvent player_tick()
     if (health.bad_seconds < 3)
         return PLAYER_EVENT_NONE;
     health.bad_seconds = 0;
-    if (!fast_now && decode_mode == DECODE_AUTO) {
+    /* fast decoding is FFmpeg's: nothing to gain on the console's decoder */
+    if (!fast_now && decode_mode == DECODE_AUTO && vdec_active == 0) {
         fprintf(stderr, "player: switching %s to fast decoding\n", current_path.c_str());
         restore_audio = libvlc_audio_get_track(mp);
         restore_spu = libvlc_video_get_spu(mp);
@@ -1667,6 +2068,10 @@ void player_stop()
 {
     live_paused = false;
     pause_wanted = -1;
+    if (queued_media) {   /* stopped before it even started */
+        libvlc_media_release(queued_media);
+        queued_media = nullptr;
+    }
     stop_in_background();
     std::lock_guard<std::mutex> g(audio_lock);
     audio_clear_locked();
@@ -1681,12 +2086,14 @@ static libvlc_state_t state()
 bool player_active()
 {
     libvlc_state_t s = state();
-    return live_paused || s == libvlc_Opening || s == libvlc_Buffering || s == libvlc_Playing ||
-           s == libvlc_Paused;
+    return live_paused || queued_media || s == libvlc_Opening || s == libvlc_Buffering ||
+           s == libvlc_Playing || s == libvlc_Paused;
 }
 
 bool player_ended()
 {
+    if (queued_media)
+        return false;   /* the next one is about to start */
     libvlc_state_t s = state();
     return s == libvlc_Ended || s == libvlc_Error;
 }
@@ -1810,12 +2217,16 @@ void player_toggle_pause()
     if (!mp)
         return;
     if (live_paused) {
-        /* back to the live point */
+        /* back to the live point: queued like an open, so a stop still
+         * stuck on the network doesn't freeze the app */
         live_paused = false;
-        wait_for_stop();
         if (last_media) {
-            libvlc_media_player_set_media(mp, last_media);
-            libvlc_media_player_play(mp);
+            libvlc_media_retain(last_media);
+            if (queued_media)
+                libvlc_media_release(queued_media);
+            queued_media = last_media;
+            if (!stopping)
+                start_queued();
         }
         return;
     }
@@ -2066,10 +2477,12 @@ void video_upload(VkCommandBuffer cmd)
          * the textures stay, and so does the last picture until the next
          * one comes; remade, the video blinked black. */
         bool same = planes.image[0] && f.width == planes.buf_w && f.height == planes.buf_h &&
-                    f.ten_bit == planes.ten_bit && f.full_range == planes.full_range;
+                    f.ten_bit == planes.ten_bit && f.full_range == planes.full_range &&
+                    f.two_planes == planes.two_planes;
         if (!same && !make_planes(f))
             return;
         planes.generation = gen;
+        planes.colour = f.colour;
     }
     if (slot < 0 || planes.generation != gen)
         return;
@@ -2086,14 +2499,15 @@ void video_upload(VkCommandBuffer cmd)
         last_slot = slot;
     }
     uint32_t bpp = f.ten_bit ? 2 : 1;
-    for (int i = 0; i < PLANES; i++) {
+    for (int i = 0; i < (f.two_planes ? 2 : PLANES); i++) {
+        uint32_t texel = bpp * (f.two_planes && i == 1 ? 2 : 1);
         gfx_barrier(cmd, planes.image[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_ACCESS_TRANSFER_WRITE_BIT);
         VkBufferImageCopy region = {};
         region.bufferOffset = f.offsets[i];
-        region.bufferRowLength = f.pitches[i] / bpp;
+        region.bufferRowLength = f.pitches[i] / texel;
         region.bufferImageHeight = f.lines[i];
         region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
         region.imageExtent = { planes.w[i], planes.h[i], 1 };
@@ -2112,6 +2526,16 @@ bool video_has_picture()
     return planes.has_picture;
 }
 
+bool video_wants_hdr_output()
+{
+    /* settings.txt hdr_output: 0 never, 1 when the console's output is HDR
+     * (the default), 2 always (a TV the console doesn't report as HDR) */
+    static const int mode = setting_int("hdr_output", 1);
+    if (mode == 0 || !planes.has_picture || planes.colour.transfer == TRC_SDR || !player_active())
+        return false;
+    return mode == 2 || gfx.display_range == 2;
+}
+
 void video_forget_picture()
 {
     planes.has_picture = false;
@@ -2123,18 +2547,18 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
         return;
     const VideoInfo &v = player_video_info();
     Push p = {};
-    /* BT.709 for HD, BT.601 for SD (VLC 3's callbacks don't say which). */
+    /* The matrix VLC names; if it doesn't, BT.709 for HD and BT.601 for SD. */
     uint32_t vis_h = v.height ? v.height : planes.buf_h;
-    if (vis_h >= 720) {
-        float r0[4] = { 1, 0, 1.5748f, 0 }, r1[4] = { 1, -0.1873f, -0.4681f, 0 },
-              r2[4] = { 1, 1.8556f, 0, 0 };
-        memcpy(p.row0, r0, 16); memcpy(p.row1, r1, 16); memcpy(p.row2, r2, 16);
-    } else {
-        float r0[4] = { 1, 0, 1.402f, 0 }, r1[4] = { 1, -0.344136f, -0.714136f, 0 },
-              r2[4] = { 1, 1.772f, 0, 0 };
-        memcpy(p.row0, r0, 16); memcpy(p.row1, r1, 16); memcpy(p.row2, r2, 16);
-    }
-    p.params[0] = planes.ten_bit ? 65535.0f / 1023.0f : 1.0f;
+    YuvMatrix m = yuv_matrix(planes.colour.matrix, vis_h);
+    float r0[4] = { 1, 0, m.kr, 0 }, r1[4] = { 1, m.kgu, m.kgv, 0 }, r2[4] = { 1, m.kb, 0, 0 };
+    memcpy(p.row0, r0, 16); memcpy(p.row1, r1, 16); memcpy(p.row2, r2, 16);
+    p.hdr[0] = (float)planes.colour.transfer;
+    p.hdr[1] = planes.colour.transfer == TRC_PQ ? planes.colour.peak : 1000;
+    p.hdr[2] = planes.colour.wide ? 1.0f : 0.0f;
+    /* I0AL keeps 10 bits at the bottom of 16, P010 at the top */
+    p.params[0] = planes.ten_bit && !planes.two_planes ? 65535.0f / 1023.0f : 1.0f;
+    p.hdr[3] = planes.two_planes ? 1.0f : 0.0f;
+    p.outp[0] = gfx.hdr && pipeline_hdr ? 1.0f : 0.0f;
     p.params[1] = planes.full_range ? 0.0f : 1.0f;
     p.params[2] = picture.hue * 3.14159265f / 180;
     p.adjust[0] = picture.brightness / 200.0f;
@@ -2163,7 +2587,7 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
     float sx1 = x + w > gfx.width ? gfx.width : x + w, sy1 = y + h > gfx.height ? gfx.height : y + h;
     VkRect2D sc = { { (int32_t)sx0, (int32_t)sy0 },
                     { (uint32_t)(sx1 - sx0 + 0.5f), (uint32_t)(sy1 - sy0 + 0.5f) } };
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gfx.hdr && pipeline_hdr ? pipeline_hdr : pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout, 0, 1, &desc_set, 0,
                             nullptr);
     vkCmdSetViewport(cmd, 0, 1, &vp);

@@ -1,0 +1,18 @@
+--- a/lib/socket.c	2026-10-10 18:59:32.030473620 +0000
++++ b/lib/socket.c	2026-10-10 18:59:32.038975423 +0000
+@@ -1072,6 +1072,15 @@
+ 
+         set_nonblocking(fd);
+         set_tcp_sockopt(fd, TCP_NODELAY, 1);
++        /* VLC-PS5: big buffers, set before connect so the TCP window is
++         * agreed on with them. The console's default (64 KiB) let one window
++         * through per round trip: ~33 Mbit/s over Wi-Fi, under a 4K film's
++         * 70 and a 16 MiB prefetch taking seconds to start a video. */
++        {
++                int rcv = 4 * 1024 * 1024, snd = 1024 * 1024;
++                setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const void *)&rcv, sizeof rcv);
++                setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const void *)&snd, sizeof snd);
++        }
+ #if 0 == CONFIGURE_OPTION_TCP_LINGER
+         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*)&yes, sizeof yes);
+         setsockopt(fd, SOL_SOCKET, SO_LINGER, (const void*)&lin, sizeof lin);
