@@ -107,7 +107,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Hardware decoding (H.264 / HEVC) | ✅ |
 | HDR → SDR tone mapping | ✅ |
 | HDR10 output to the TV | ✅ |
-| Hardware decoding (VP9 up to 4K) | Not yet |
+| Hardware decoding (VP9 up to 4K) | ✅ |
 | Upscaling up to 4K (FSR 1, Lanczos, Anime4K etc) | Not yet |
 
 ### 🔊 Audio
@@ -192,7 +192,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 |---|---|
 | DVD folders and ISOs with menus | ✅ |
 | Blu-ray folders and ISOs (unprotected) | ✅ |
-| Blu-ray Java (BD-J) menus | ❌ needs Java, which the PS5 hasn't got: those discs play without menus |
+| Blu-ray Java (BD-J) menus | ❌ Java Blu-ray menus not supported |
 | ZIP, RAR and 7z archives open like folders | ✅ |
 
 ## Building
