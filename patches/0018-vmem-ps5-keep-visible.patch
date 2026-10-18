@@ -1,0 +1,38 @@
+--- a/modules/video_output/vmem.c
++++ b/modules/video_output/vmem.c
+@@ -145,6 +145,8 @@
+         var_InheritAddress(vd, "vmem-colour");
+     if (colour != NULL)
+         colour(sys->opaque, &fmt);
++    /* VLC-PS5: the decoder's own format, for its visible part below */
++    const video_format_t source = fmt;
+ 
+     if (setup != NULL) {
+         char chroma[5];
+@@ -178,9 +180,23 @@
+         }
+         sys->cleanup = NULL;
+     }
+-    fmt.i_x_offset = fmt.i_y_offset = 0;
+-    fmt.i_visible_width = fmt.i_width;
+-    fmt.i_visible_height = fmt.i_height;
++    /* VLC-PS5: a buffer at the decoder's own size keeps the decoder's
++     * visible part (1280x720 in 1280x736; 3840x2160 in 3840x2176): called
++     * all visible, it made VLC scale every picture on the CPU to fill it
++     * (swscale, a whole 4K picture per frame in software decoding). The
++     * app crops it when drawing. */
++    if (fmt.i_width == source.i_width && fmt.i_height == source.i_height &&
++        source.i_x_offset == 0 && source.i_y_offset == 0 &&
++        source.i_visible_width > 0 && source.i_visible_height > 0 &&
++        source.i_visible_width <= fmt.i_width && source.i_visible_height <= fmt.i_height) {
++        fmt.i_x_offset = fmt.i_y_offset = 0;
++        fmt.i_visible_width = source.i_visible_width;
++        fmt.i_visible_height = source.i_visible_height;
++    } else {
++        fmt.i_x_offset = fmt.i_y_offset = 0;
++        fmt.i_visible_width = fmt.i_width;
++        fmt.i_visible_height = fmt.i_height;
++    }
+ 
+     if (!fmt.i_chroma) {
+         msg_Err(vd, "vmem-chroma should be 4 characters long");

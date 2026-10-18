@@ -1,0 +1,16 @@
+--- a/src/input/clock.c
++++ b/src/input/clock.c
+@@ -80,7 +80,12 @@
+  *****************************************************************************/
+ 
+ /* Maximum gap allowed between two CRs. */
+-#define CR_MAX_GAP (60 * CLOCK_FREQ)
++/* VLC-PS5: 10 s, not 60. Between two clock references of one stream
++ * (sent every 100 ms or so) a jump over 10 s is a new start; at 60 s a free
++ * TV channel's ad break that moved its times by 35 s was taken as playing
++ * on, every picture and sound counted 35 s late and thrown away, and the
++ * picture froze (a Pluto channel, 2026-10-18). */
++#define CR_MAX_GAP (10 * CLOCK_FREQ)
+ 
+ /* Latency introduced on DVDs with CR == 0 on chapter change - this is from
+  * my dice --Meuuh */

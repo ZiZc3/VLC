@@ -1,0 +1,15 @@
+--- a/modules/demux/adaptive/logic/BufferingLogic.cpp
++++ b/modules/demux/adaptive/logic/BufferingLogic.cpp
+@@ -38,7 +38,11 @@
+ using namespace adaptive::logic;
+ 
+ const vlc_tick_t AbstractBufferingLogic::BUFFERING_LOWEST_LIMIT = CLOCK_FREQ * 2;
+-const vlc_tick_t AbstractBufferingLogic::DEFAULT_MIN_BUFFERING = CLOCK_FREQ * 6;
++/* VLC-PS5: 3 s before a live channel starts, not 6: on the console's Wi-Fi
++ * (about 700 KiB/s to far servers) 6 s of an 8 Mbit/s channel took 4-5 s to
++ * come in, and channels were slow to show (2026-10-18). It still fills up
++ * to its live delay while it plays. */
++const vlc_tick_t AbstractBufferingLogic::DEFAULT_MIN_BUFFERING = CLOCK_FREQ * 3;
+ const vlc_tick_t AbstractBufferingLogic::DEFAULT_MAX_BUFFERING = CLOCK_FREQ * 30;
+ const vlc_tick_t AbstractBufferingLogic::DEFAULT_LIVE_BUFFERING = CLOCK_FREQ * 15;
+ 

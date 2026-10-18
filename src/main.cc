@@ -8,7 +8,9 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#include <math.h>
 #include <stdio.h>
+#include <string>
 #include <stdlib.h>
 
 #include "backends/imgui_impl_vulkan.h"
@@ -97,12 +99,67 @@ int main(void)
 
         /* HDR10 output while an HDR video shows (once a refusal, not again
          * until the wish changes) */
+        /* The wish has to hold a moment first: while a video starts (its
+         * picture set up, set up again) it came and went, and each switch
+         * blanks the screen (on, off, on, off in a second: a 2026-10-13 log). */
         static bool hdr_refused;
+        static double wish_since;
+        static bool wish_last;
         bool want_hdr = video_wants_hdr_output();
-        if (want_hdr != gfx.hdr && !(want_hdr && hdr_refused))
+        if (want_hdr != wish_last) {
+            wish_last = want_hdr;
+            wish_since = plat_time();
+        }
+        double hold = want_hdr ? 0.4 : 1.0;
+        if (want_hdr != gfx.hdr && !(want_hdr && hdr_refused) && plat_time() - wish_since >= hold)
             hdr_refused = !gfx_set_hdr(want_hdr);
         if (!want_hdr)
             hdr_refused = false;
+
+        /* Match frame rate: the output's refresh follows the film playing
+         * (23.976 / 24 / 50 Hz), and goes back to the default after. Asked
+         * once a picture is up (the rate is known then); a mode the TV
+         * doesn't really run at (the vblanks say) is put back and not asked
+         * again for that video. */
+        {
+            static int mode_now = 1;
+            static std::string refused_for;
+            int want = 1;
+            const VideoInfo &vi = player_video_info();
+            if (player_match_rate() && player_active() && video_has_picture() && vi.fps > 0 &&
+                refused_for != player_current_path()) {
+                float f = vi.fps;
+                if (fabsf(f - 23.976f) < 0.01f)
+                    want = 2;
+                else if (fabsf(f - 24.0f) < 0.01f)
+                    want = 3;
+                else if (fabsf(f - 25.0f) < 0.05f || fabsf(f - 50.0f) < 0.1f)
+                    want = 9;
+            }
+            if (want != mode_now) {
+                int period = 0;
+                bool ok = gfx_set_refresh(want, &period);
+                static const struct { int mode, us; } expect[] = { { 1, 16683 }, { 2, 41708 }, { 3, 41667 }, { 9, 20000 } };
+                int us = 0;
+                for (const auto &e : expect)
+                    if (e.mode == want)
+                        us = e.us;
+                if (ok && period > 0 && fabs(period - us) > us * 0.05) {
+                    fprintf(stderr, "main: output mode %d taken but a vblank every %d us (not %d): default again\n",
+                            want, period, us);
+                    gfx_set_refresh(1, &period);
+                    ok = false;
+                }
+                if (ok || want == 1) {
+                    mode_now = ok ? want : 1;
+                } else {
+                    refused_for = player_current_path();
+                    if (mode_now != 1 && gfx_set_refresh(1, &period))
+                        mode_now = 1;
+                }
+                fprintf(stderr, "main: refresh %s for %.3f fps\n", ok ? "matched" : "not matched", vi.fps);
+            }
+        }
 
         VkCommandBuffer cmd = gfx_begin_frame();
         if (!cmd)

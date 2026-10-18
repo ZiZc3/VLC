@@ -10,6 +10,7 @@
  *                                      options touchpad)
  *       <frame> hold <button> <frames>
  *       <frame> shot <file.png>        saves that frame
+ *       <frame> type <text>            the on-screen keyboard gets it (_ for a space)
  *       <frame> quit
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -27,7 +28,7 @@
 
 typedef struct {
     uint64_t frame;
-    enum { STEP_HOLD, STEP_SHOT, STEP_QUIT, STEP_STICK } kind;
+    enum { STEP_HOLD, STEP_SHOT, STEP_QUIT, STEP_STICK, STEP_TYPE } kind;
     uint32_t button;
     float rx, ry;     /* STEP_STICK: the right stick, held for frames */
     uint64_t frames;
@@ -87,6 +88,11 @@ static void load_script(void)
             s->frames = frames;
         } else if (!strcmp(word, "shot") && sscanf(line, "%*u %*s %255s", s->path) == 1) {
             s->kind = STEP_SHOT;
+        } else if (!strcmp(word, "type") && sscanf(line, "%*u %*s %255s", s->path) == 1) {
+            s->kind = STEP_TYPE;
+            for (char *c = s->path; *c; c++)
+                if (*c == '_')
+                    *c = ' ';
         } else if (!strcmp(word, "quit")) {
             s->kind = STEP_QUIT;
             quit_frame = frame;
@@ -254,4 +260,17 @@ const char *plat_screenshot_path(uint64_t frame)
 bool plat_script_done(uint64_t frame)
 {
     return frame >= quit_frame;
+}
+
+/* Script "type" steps due by now, once (the interface's keyboard reads it). */
+const char *plat_take_typed(void)
+{
+    static int next;
+    for (; next < nsteps; next++) {
+        if (steps[next].frame > frame_now)
+            break;
+        if (steps[next].kind == STEP_TYPE)
+            return steps[next++].path;
+    }
+    return NULL;
 }

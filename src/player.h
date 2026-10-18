@@ -90,10 +90,18 @@ void player_spectrum(float *bands, int n);
 /* Render thread, every frame: */
 void video_upload(VkCommandBuffer cmd);           /* before the render pass */
 bool video_has_picture();
+/* seconds since the video was opened */
+double player_open_age();
 /* An HDR video is showing and HDR10 output is wanted for it (settings.txt
  * hdr_output, the console's output). */
 bool video_wants_hdr_output();
+/* Match frame rate: films at 23.976 / 24 / 25 / 50 fps switch the TV to that
+ * refresh while they play (saved; Off by default: some TVs blank a moment). */
+bool player_match_rate();
+const std::string &player_current_path(); /* what plays (or was last opened) */
+void player_set_match_rate(bool on);
 void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h); /* in the pass */
+float video_picture_aspect(); /* the pictures VLC sends now: width / height (0: none yet) */
 void video_forget_picture();                      /* back to the library */
 /* One line about the player in the log (state, time, picture slots, sound queue,
  * pictures decoded/shown/lost since the last line). */
@@ -178,6 +186,10 @@ void player_set_debug_log(bool on);
 DecodeMode player_decode_mode();
 void player_set_decode_mode(DecodeMode mode); /* saved; applies from the next file */
 bool player_fast_decoding();                  /* the current file decodes fast */
+/* Hardware decoding (the console's video decoder) or FFmpeg on the CPU:
+ * saved; applies from the next video. */
+bool player_hw_decoding();
+void player_set_hw_decoding(bool on);
 /* Main thread, every frame while playing: watches for lost pictures. */
 enum PlayerEvent { PLAYER_EVENT_NONE, PLAYER_EVENT_WENT_FAST, PLAYER_EVENT_TOO_SLOW };
 PlayerEvent player_tick();

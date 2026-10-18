@@ -46,6 +46,11 @@ void gfx_begin_pass(VkCommandBuffer cmd);
 void gfx_end_frame(VkCommandBuffer cmd);
 /* HDR10 output on or off (waits for the GPU); false if it couldn't change. */
 bool gfx_set_hdr(bool on);
+/* What the console sends to the TV now: 1 SDR, 2 HDR, other unknown. */
+int gfx_output_range();
+/* The output's refresh (VideoOut modes: 2 = 23.976 Hz, 3 = 24, 9 = 50,
+ * 1 = the default); the vblank period measured after, in microseconds. */
+bool gfx_set_refresh(int mode, int *period_us);
 /* With HDR10 output on, a frame is: the UI pass (ImGui into its own layer),
  * then the HDR pass (the video, then gfx_draw_ui_layer), then gfx_end_frame. */
 void gfx_begin_ui_pass(VkCommandBuffer cmd);

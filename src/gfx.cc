@@ -28,6 +28,7 @@
 /* The console's Vulkan driver, with patches/mesa/0001 (absent elsewhere). */
 extern "C" int vlcps5_wsi_videoout_set_hdr(int enable) __attribute__((weak));
 extern "C" int vlcps5_wsi_videoout_dynamic_range(void) __attribute__((weak));
+extern "C" int vlcps5_wsi_videoout_set_refresh(int mode, int *period_us) __attribute__((weak));
 
 Gfx gfx;
 
@@ -617,6 +618,23 @@ bool gfx_set_hdr(bool on)
     return true;
 }
 
+bool gfx_set_refresh(int mode, int *period_us)
+{
+    *period_us = 0;
+    if (!vlcps5_wsi_videoout_set_refresh)
+        return false;
+    /* nothing in flight while the output changes */
+    vkDeviceWaitIdle(gfx.device);
+    return vlcps5_wsi_videoout_set_refresh(mode, period_us) == 0;
+}
+
+int gfx_output_range()
+{
+    if (vlcps5_wsi_videoout_dynamic_range)
+        return vlcps5_wsi_videoout_dynamic_range();
+    return gfx.offscreen && getenv("VLCPS5_HDR_TEST") ? atoi(getenv("VLCPS5_HDR_TEST")) : -1;
+}
+
 void gfx_begin_ui_pass(VkCommandBuffer cmd)
 {
     begin(cmd, hdr.ui_pass, hdr.ui_fb, 0.0f);   /* clear: transparent */
@@ -817,7 +835,26 @@ bool gfx_image(uint32_t w, uint32_t h, VkFormat format, VkImageUsageFlags usage,
     ai.memoryTypeIndex = gfx_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (ai.memoryTypeIndex == UINT32_MAX)
         ai.memoryTypeIndex = gfx_memory_type(req.memoryTypeBits, 0);
-    CHECK(vkAllocateMemory(gfx.device, &ai, nullptr, memory));
+    VkResult r = vkAllocateMemory(gfx.device, &ai, nullptr, memory);
+    /* The video memory full (a 4K HDR film's decoder holds 840 MiB of it):
+     * any other kind the image can live in. Failing, a 4K video stayed
+     * black for the whole of its first open (2026-10-18). */
+    for (uint32_t t = 0; r != VK_SUCCESS && t < 32; t++) {
+        if (!(req.memoryTypeBits & (1u << t)) || t == ai.memoryTypeIndex)
+            continue;
+        VkMemoryAllocateInfo other = ai;
+        other.memoryTypeIndex = t;
+        r = vkAllocateMemory(gfx.device, &other, nullptr, memory);
+        if (r == VK_SUCCESS)
+            fprintf(stderr, "gfx: %ux%u image: video memory full, memory type %u instead\n", w, h, t);
+    }
+    if (r != VK_SUCCESS) {
+        fprintf(stderr, "gfx: no memory for a %ux%u image (%llu KiB): %d\n", w, h,
+                (unsigned long long)(req.size >> 10), r);
+        vkDestroyImage(gfx.device, *image, nullptr);
+        *image = VK_NULL_HANDLE;
+        return false;
+    }
     CHECK(vkBindImageMemory(gfx.device, *image, *memory, 0));
     VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     vi.image = *image;

@@ -54,6 +54,10 @@
 
 namespace {
 
+extern bool log_debug;
+/* The picture diagnostics (2026-10-18): only with debug=1 in settings.txt */
+#define DIAG(...) do { if (log_debug) fprintf(stderr, __VA_ARGS__); } while (0)
+
 libvlc_instance_t *vlc;
 libvlc_media_player_t *mp;
 std::string current_path;
@@ -76,6 +80,7 @@ std::atomic<bool> vdec_failed{ false };
 std::atomic<int> vdec_active{ 0 };   /* decoders open on the console's decoder */
 /* how long a video takes to show its first picture (the log) */
 double opened_at;
+int64_t opened_from_ms;   /* where the open started */
 bool first_picture_wait;
 std::string software_path;
 struct Health {
@@ -149,6 +154,9 @@ struct Colour {
     bool wide = false;         /* BT.2020 primaries */
     float peak = 1000;         /* the picture's brightest, in nits (HDR) */
     bool full_range = false;   /* 0-255 (VLC says so; NV12 has no "J" name) */
+    /* the decoder's buffer and the part of it that is picture (1280x720 in
+     * 1280x736): patches/0018 has vmem keep it, the shader crops */
+    uint32_t buf_w = 0, buf_h = 0, vis_w = 0, vis_h = 0;
 };
 /* HDR's reference white (BT.2408): what shows as the TV's white in SDR */
 const float SDR_WHITE = 203;
@@ -163,6 +171,7 @@ struct Format {
      * interleaved in one plane; P010 keeps its 10 bits at the top */
     bool two_planes;
     Colour colour;
+    uint32_t vis_w, vis_h;         /* the picture in the buffer (top left) */
 };
 
 std::mutex pic_lock;
@@ -170,6 +179,54 @@ std::condition_variable pic_freed;
 Slot slots[SLOTS];
 Format format;
 int generation;        /* bumped by every vmem setup */
+std::atomic<bool> stopping; /* the video before is stopping (in the background) */
+/* The same video reopened (hardware to software, fast decoding): its last
+ * picture stays up until the reopened one's first comes, instead of black */
+std::atomic<bool> hold_picture;
+
+/* Each open's number, given to ps5http (":ps5http-serial"): a stop marks its
+ * number cancelled and its connections end at once. Leaving a slow channel
+ * waited 10 s for its server to finish sending a segment, and the next video
+ * waited with it (2026-10-18). */
+std::atomic<long> cancelled_serial;
+long next_serial, queued_serial, started_serial;
+
+/* A live stream that ended by itself (a segment the server lost, 404):
+ * opened again, a few times, instead of "Watch again" on a TV channel. */
+int live_reconnects;
+bool live_reconnecting;
+int64_t live_last_ms, live_last_len;
+
+/* Diagnostics, always in the log, a few lines per video (2026-10-18: a
+ * flash of another video with hardware decoding, not seen on the PC): each
+ * of the first pictures' brightness when VLC hands it over and when it goes
+ * up to the screen (a buffer written over in between shows as two numbers),
+ * and every unusual path a picture takes. */
+const int DIAG_PICTURES = 15;
+int diag_shown, diag_up, diag_draws, diag_odd;
+std::atomic<int> diag_vlc_timing; /* VLC's lateness messages let into the log, this video */
+static const char *const slot_names[] = { "free", "writing", "ready", "shown", "gpu" };
+
+/* Average brightness (0-255) of a slot's picture: 16x16 points of its luma. */
+unsigned slot_luma(const Slot &sl, const Format &f)
+{
+    if (!sl.mapped || !f.width || !f.height)
+        return 0;
+    uint32_t w = f.vis_w ? f.vis_w : f.width, h = f.vis_h ? f.vis_h : f.height;
+    const uint8_t *y0 = sl.mapped + f.offsets[0];
+    uint64_t sum = 0;
+    for (unsigned y = 0; y < 16; y++) {
+        const uint8_t *row = y0 + (size_t)(h * y / 16 + h / 32) * f.pitches[0];
+        for (unsigned x = 0; x < 16; x++) {
+            unsigned px = w * x / 16 + w / 32;
+            if (!f.ten_bit)
+                sum += row[px];
+            else    /* P010: 10 bits at the top; I0AL: at the bottom */
+                sum += f.two_planes ? ((const uint16_t *)row)[px] >> 8 : ((const uint16_t *)row)[px] >> 2;
+        }
+    }
+    return (unsigned)(sum / 256);
+}
 Colour next_colour;    /* vmem_colour's, for the setup right after it */
 int shown = -1;        /* the slot VLC displayed last, not uploaded yet */
 std::atomic<uint64_t> completed_frame{ 0 };
@@ -189,9 +246,14 @@ struct Planes {
     uint32_t w[PLANES], h[PLANES];
     int generation = -1;
     bool has_picture;
+    /* the frame textures of a new shape came in: the interface placed the
+     * video earlier in that frame, with the shape before */
+    uint64_t new_shape_frame;
+    float prev_aspect;   /* the last setup's picture shape */
     bool ten_bit, full_range, two_planes;
     Colour colour;
     uint32_t buf_w, buf_h;
+    uint32_t vis_w, vis_h;
 } planes;
 
 VkSampler sampler;
@@ -259,6 +321,12 @@ void vmem_colour(void *opaque, const video_format_t *fmt)
     default: c.matrix = c.transfer != TRC_SDR ? MATRIX_2020 : MATRIX_AUTO; break;
     }
     c.full_range = fmt->b_color_range_full;
+    if (!fmt->i_x_offset && !fmt->i_y_offset) {
+        c.buf_w = fmt->i_width;
+        c.buf_h = fmt->i_height;
+        c.vis_w = fmt->i_visible_width;
+        c.vis_h = fmt->i_visible_height;
+    }
     c.wide = fmt->primaries == COLOR_PRIMARIES_BT2020 ||
              (fmt->primaries == COLOR_PRIMARIES_UNDEF && c.transfer != TRC_SDR);
     /* How bright it gets: the content's own light level, else the mastering
@@ -386,6 +454,12 @@ unsigned vmem_setup(void **opaque, char *chroma, unsigned *width, unsigned *heig
     f.two_planes = two;
     f.colour = next_colour;
     f.full_range = full || f.colour.full_range;
+    /* vmem keeps the decoder's visible part when the buffer stays the
+     * decoder's size (patches/0018); otherwise all of it is picture */
+    bool keep = f.colour.buf_w == *width && f.colour.buf_h == *height && f.colour.vis_w &&
+                f.colour.vis_h && f.colour.vis_w <= *width && f.colour.vis_h <= *height;
+    f.vis_w = keep ? f.colour.vis_w : *width;
+    f.vis_h = keep ? f.colour.vis_h : *height;
     next_colour = Colour{};
     uint32_t bpp = ten ? 2 : 1;
     uint32_t cw = (*width + 1) / 2, ch = (*height + 1) / 2;
@@ -419,6 +493,8 @@ unsigned vmem_setup(void **opaque, char *chroma, unsigned *width, unsigned *heig
     format = f;
     info_stale = true;
     generation++;
+    diag_shown = diag_up = diag_draws = 0;
+    diag_vlc_timing = 0;
     fprintf(stderr, "player: pictures %ux%u %s%s%s, %d x %llu KiB\n", f.width, f.height,
             ten ? "10-bit" : "8-bit", two ? (ten ? " P010" : " NV12") : "",
             f.full_range ? " full range" : "", SLOTS,
@@ -464,9 +540,13 @@ void *vmem_lock(void *opaque, void **out)
                 found = i;
                 break;
             }
+        if (diag_odd++ < 20)
+            DIAG("diag: no free picture buffer: VLC writes over ready one %d\n", found);
     }
     if (found < 0 || !slots[found].buffer) {
         /* Shouldn't happen; give VLC somewhere harmless to write. */
+        if (diag_odd++ < 20)
+            DIAG("diag: no picture buffer at all: VLC writes to a scratch one\n");
         static uint8_t *scratch;
         static VkDeviceSize scratch_size;
         if (scratch_size < format.size) {
@@ -499,15 +579,37 @@ void vmem_display(void *opaque, void *picture)
     (void)opaque;
     int i = (int)(intptr_t)picture;
     std::lock_guard<std::mutex> g(pic_lock);
-    if (i < 0 || i >= SLOTS || slots[i].state != READY)
+    if (i < 0 || i >= SLOTS || slots[i].state != READY) {
+        if (diag_odd++ < 20)
+            DIAG("diag: picture %d to show isn't ready (%s): not shown\n", i,
+                    i >= 0 && i < SLOTS ? slot_names[slots[i].state] : "none");
         return;
-    if (shown >= 0 && shown != i && slots[shown].state == SHOWN)
+    }
+    if (stopping) {
+        if (diag_odd++ < 20)
+            DIAG("diag: picture %d of the video before (stopping): dropped\n", i);
+        /* the video before, on its way out: its last pictures aren't for
+         * the screen (one came up in the next video's frame for a moment,
+         * "a frame from another video", 2026-10-13) */
+        slots[i].state = FREE;
+        return;
+    }
+    if (shown >= 0 && shown != i && slots[shown].state == SHOWN) {
         slots[shown].state = FREE; /* never drawn: the screen was slower */
+        if (diag_shown < DIAG_PICTURES)
+            DIAG("diag: picture %d replaced before it was drawn\n", shown);
+    }
     slots[i].state = SHOWN;
     shown = i;
+    if (diag_shown < DIAG_PICTURES) {
+        diag_shown++;
+        DIAG("diag shown %d: buffer %d, setup %d, %.3f s after the open, frame %llu, luma %u\n",
+                diag_shown, i, generation, plat_time() - opened_at,
+                (unsigned long long)gfx.frame_number, slot_luma(slots[i], format));
+    }
     if (first_picture_wait) {
         first_picture_wait = false;
-        fprintf(stderr, "player: first picture %.2f s after the open\n", plat_time() - opened_at);
+        fprintf(stderr, "player: [%.2f] first picture %.2f s after the open\n", plat_time(), plat_time() - opened_at);
     }
 }
 
@@ -559,7 +661,6 @@ int amem_setup(void **opaque, char *format, unsigned *rate, unsigned *channels)
 }
 
 /* True while a stop runs in the background: what VLC still sends is dropped. */
-std::atomic<bool> stopping;
 /* A video opened while the one before was still stopping: started after. */
 libvlc_media_t *queued_media;
 
@@ -766,10 +867,19 @@ void audio_main()
 
 /* ---- libvlc ------------------------------------------------------------------- */
 
+/* VLC's player, for a question from the interface: none while the video
+ * before stops in the background. VLC's getters (time, length, tracks...)
+ * wait for its stop then: 8.6 s on a live stream that was ending, and the
+ * whole app froze (2026-10-13). */
+static libvlc_media_player_t *asking()
+{
+    return stopping ? nullptr : mp;
+}
+
 void read_info()
 {
     unsigned w = 0, h = 0;
-    if (libvlc_video_get_size(mp, 0, &w, &h) != 0 || !w || !h)
+    if (!asking() || libvlc_video_get_size(mp, 0, &w, &h) != 0 || !w || !h)
         return;
     VideoInfo v = {};
     v.width = w;
@@ -981,6 +1091,8 @@ bool make_planes(const Format &f)
     planes.two_planes = f.two_planes;
     planes.buf_w = f.width;
     planes.buf_h = f.height;
+    planes.vis_w = f.vis_w ? f.vis_w : f.width;
+    planes.vis_h = f.vis_h ? f.vis_h : f.height;
     planes.has_picture = false;
     return true;
 }
@@ -1008,7 +1120,10 @@ void vlc_log(void *data, int level, const libvlc_log_t *ctx, const char *fmt, va
 {
     (void)data;
     /* Normally errors only (a warning flood, "picture is too late", costs
-     * nothing on screen now but fills the log); debug=1 in settings.txt: all. */
+     * nothing on screen now but fills the log); debug=1 in settings.txt: all.
+     * Pictures VLC drops as late and the clock's corrections are let through,
+     * 40 per video at most: why a video stutters (planet_earth, 2026-10-18). */
+    bool timing = false;
     if (level < LIBVLC_ERROR && !log_debug)
         return;
     static const char *const names[] = { "debug", "", "info", "warning", "error" };
@@ -1017,6 +1132,10 @@ void vlc_log(void *data, int level, const libvlc_log_t *ctx, const char *fmt, va
     libvlc_log_get_context(ctx, &module, &file, &line);
     char msg[1024];
     vsnprintf(msg, sizeof(msg), fmt, args);
+    if (timing) {
+        fprintf(stderr, "vlc timing [%.2f]: %s\n", plat_time(), msg);
+        return;
+    }
     /* The console logger's own option, asked for by others; it isn't linked. */
     if (!strcmp(msg, "option quiet does not exist"))
         return;
@@ -1069,14 +1188,48 @@ void load_decode_mode()
     }
 }
 
+/* VLC's playback numbers, read on a thread of their own: read on the
+ * interface's thread (the health check, every second), they once waited
+ * 8.9 s for a live stream that was ending, and the whole app froze
+ * (2026-10-13). The interface takes the latest copy. */
+std::thread stats_thread;
+std::atomic<bool> stats_run;
+std::mutex stats_lock;
+libvlc_media_stats_t stats_copy;
+bool stats_have;
+std::atomic<unsigned> stats_serial; /* a new video: numbers read before it are dropped */
+
+void stats_loop()
+{
+    while (stats_run) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        unsigned serial = stats_serial;
+        libvlc_media_t *m = mp ? libvlc_media_player_get_media(mp) : nullptr;
+        libvlc_media_stats_t s = {};
+        bool ok = m && libvlc_media_get_stats(m, &s) != 0;
+        if (m)
+            libvlc_media_release(m);
+        std::lock_guard<std::mutex> g(stats_lock);
+        if (serial != stats_serial)
+            continue; /* the video before's (negative counts, 2026-10-13) */
+        stats_copy = s;
+        stats_have = ok;
+    }
+}
+
+void stats_forget()
+{
+    std::lock_guard<std::mutex> g(stats_lock);
+    stats_serial++;
+    stats_copy = {};
+    stats_have = false;
+}
+
 bool get_stats(libvlc_media_stats_t *s)
 {
-    libvlc_media_t *m = mp ? libvlc_media_player_get_media(mp) : nullptr;
-    if (!m)
-        return false;
-    bool ok = libvlc_media_get_stats(m, s) != 0;
-    libvlc_media_release(m);
-    return ok;
+    std::lock_guard<std::mutex> g(stats_lock);
+    *s = stats_copy;
+    return stats_have;
 }
 
 vlc_object_t *mp_object()
@@ -1310,6 +1463,12 @@ extern "C" void vlc_ps5_copy_plane(uint8_t *dst, size_t dst_pitch, const uint8_t
 }
 
 /* ps5/modules/ps5vdec.c, from VLC's decoder thread */
+/* ps5vdec and ps5http: their diagnostic lines with the detailed log only */
+extern "C" int vlc_ps5_log_details(void)
+{
+    return log_debug;
+}
+
 extern "C" void vlc_ps5_vdec_failed(void)
 {
     vdec_failed = true;
@@ -1329,7 +1488,9 @@ bool player_init()
     }
     cpu_probe();
     load_decode_mode();
-    log_debug = setting_int("debug", 0) != 0 || setting_int("vlc_debug", 0) != 0 || pref_int("debug", 0) != 0;
+    /* settings.txt only: the Settings row is gone, and an old prefs.txt debug=1
+     * would have left it on with no way to turn it off */
+    log_debug = setting_int("debug", 0) != 0 || setting_int("vlc_debug", 0) != 0;
     /* The subtitle fonts from the app's folder, wherever it is now (it isn't
      * /app0 after the sandbox was lifted). */
     std::string font = "--freetype-font=" + std::string(plat_data_dir()) + "/fonts/subtitle.ttf";
@@ -1399,6 +1560,8 @@ bool player_init()
         audio_thread = std::thread(audio_main);
     }
     fprintf(stderr, "player: libvlc %s ready\n", libvlc_get_version());
+    stats_run = true;
+    stats_thread = std::thread(stats_loop);
     return true;
 }
 
@@ -1423,8 +1586,15 @@ static void wait_for_stop()
         stopper.join();
 }
 
+extern "C" int vlc_ps5_stream_cancelled(long serial)
+{
+    return serial > 0 && serial <= cancelled_serial;
+}
+
 static void stop_in_background()
 {
+    if (started_serial > cancelled_serial)
+        cancelled_serial = started_serial;
     /* already stopping: nothing new can have started since (an open waits
      * for the stop), and waiting for it here froze the app */
     if (stopping)
@@ -1446,6 +1616,9 @@ static void stop_in_background()
 
 void player_shutdown()
 {
+    stats_run = false;
+    if (stats_thread.joinable())
+        stats_thread.join();
     wait_for_stop();
     if (mp) {
         libvlc_media_player_stop(mp);
@@ -1482,9 +1655,13 @@ bool player_open(const std::string &path, int64_t start_ms, const std::vector<st
                             : libvlc_media_new_path(vlc, path.c_str());
     if (!m)
         return false;
-    for (const std::string &o : options)
+    /* the same one again (hardware to software, a reconnect): its own
+     * options too, or a channel that needs its user agent or referrer
+     * failed on the reopen */
+    const std::vector<std::string> &use = options.empty() && path == current_path ? source_options : options;
+    for (const std::string &o : use)
         libvlc_media_add_option(m, o.c_str());
-    return player_open_media(m, path, start_ms, options);
+    return player_open_media(m, path, start_ms, std::vector<std::string>(use));
 }
 
 std::string file_uri(const std::string &path);
@@ -1673,6 +1850,10 @@ void side_subs_find(const std::string &url, int serial)
     bool link = url_scheme_is(url, "http") || url_scheme_is(url, "https");
     if (!listable && !link)
         return;
+    static const char *const video_exts[] = { "mkv", "mp4", "m4v", "avi", "mov", "webm", "wmv", "flv", "ts",
+                                              "m2ts", "mts", "mpg", "mpeg", "vob", "ogv", "3gp", "divx", "rmvb" };
+    if (link && std::none_of(std::begin(video_exts), std::end(video_exts), [&](const char *e) { return ext == e; }))
+        return; /* a channel's address (".../udp/239.94.1.24:5140"): no file beside it to guess */
     std::vector<std::string> opts = source_options;
     /* its own reference: a quit during the listing (up to 8 s) mustn't free
      * VLC under it */
@@ -1778,6 +1959,7 @@ static bool start_queued();
 bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms,
                        const std::vector<std::string> &options)
 {
+    opened_from_ms = start_ms;
     /* A reopen of the same file (Auto's, Watch again) keeps its login. */
     if (!options.empty() || path != current_path)
         source_options = options;
@@ -1796,7 +1978,20 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
     }
     if (url) {
         side_subs_find(path, side.serial);
+        /* Live TV over the network: 2 s of buffer, not VLC's 1. Channels
+         * whose segments come in late made VLC grow its buffer as it played
+         * ("PCR is called too late"), and the picture stuttered each time
+         * (a BBC channel, 2026-10-13). Shares and files keep VLC's own. */
+        if (url_scheme_is(path, "http") || url_scheme_is(path, "https") || url_scheme_is(path, "udp") ||
+            url_scheme_is(path, "rtp"))
+            libvlc_media_add_option(m, ":network-caching=2000");
     } else if (!local.empty()) {
+        /* 1 s between decoding and showing, not VLC's 0.3 s for files: the
+         * console's VP9 decoder gives a picture back a few pictures later,
+         * and with YouTube's hidden frames at 24 fps that passed 0.3 s, so
+         * VLC dropped 2 pictures a second as late (planet_earth, 2026-10-18).
+         * A file reads in at once: it starts no later. */
+        libvlc_media_add_option(m, ":file-caching=1000");
         std::vector<std::string> subs = local_side_subs(local);
         bool on = player_sub_language() != "off";
         std::string hint = sub_lang_hint();
@@ -1852,7 +2047,7 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
         libvlc_media_add_option(m, ":avcodec-skiploopfilter=4");
         libvlc_media_add_option(m, ":avcodec-fast");
     }
-    bool software = path == software_path || setting_int("hw_decode", 1) == 0;
+    bool software = path == software_path || !player_hw_decoding();
     if (software)
         libvlc_media_add_option(m, ":no-ps5vdec");
     live_paused = false;
@@ -1861,21 +2056,31 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
     info_tries = 0;
     current_path = path;
     health = Health{};
+    stats_forget();
     /* Opening and the first second drop pictures anyway; a resume also seeks
      * and buffers first (run 19: one false "can't keep up" right after it). */
     health.next = plat_time() + (start_ms > 0 ? 5 : 3);
     debug_last = libvlc_media_stats_t{};
-    fprintf(stderr, "player: open %s at %lld ms%s%s\n", path.c_str(), (long long)start_ms,
+    fprintf(stderr, "player: [%.2f] open %s at %lld ms%s%s\n", plat_time(), path.c_str(), (long long)start_ms,
             fast_now ? " (fast decoding)" : "", software ? " (software decoding)" : "");
     /* The video before may still be stopping: a stream stuck on its network
      * kept VLC's stop waiting 9 s, and waiting for it here froze the whole
      * app (console run 12). This one then starts from player_tick once the
      * stop is done. */
+    queued_serial = ++next_serial;
+    {
+        char opt[48];
+        snprintf(opt, sizeof(opt), ":ps5http-serial=%ld", queued_serial);
+        libvlc_media_add_option(m, opt);
+    }
+    if (!live_reconnecting)
+        live_reconnects = 0;
+    live_last_ms = live_last_len = 0;
     if (queued_media)
         libvlc_media_release(queued_media);
     queued_media = m;
     if (stopping) {
-        fprintf(stderr, "player: the video before is still stopping: this one starts after\n");
+        fprintf(stderr, "player: [%.2f] the video before is still stopping: this one starts after\n", plat_time());
         return true;
     }
     return start_queued();
@@ -1889,7 +2094,26 @@ static bool start_queued()
         return false;
     queued_media = nullptr;
     wait_for_stop();
+    started_serial = queued_serial;
     libvlc_media_player_set_media(mp, m);
+    stats_forget(); /* until now the media was the video before */
+    debug_last = libvlc_media_stats_t{};
+    {
+        /* the video before is gone now: a picture of it still waiting to go
+         * up would show in this one's frame for a moment */
+        std::lock_guard<std::mutex> g(pic_lock);
+        if (shown >= 0 && slots[shown].state == SHOWN) {
+            slots[shown].state = FREE;
+            DIAG("diag: a picture of the video before was waiting: dropped\n");
+        }
+        shown = -1;
+        char states[64] = "";
+        for (const Slot &sl : slots)
+            snprintf(states + strlen(states), sizeof(states) - strlen(states), "%s ",
+                     sl.buffer ? slot_names[sl.state] : "-");
+        DIAG("diag: starting, setup %d, buffers [%s]\n", generation, states);
+        diag_odd = 0;
+    }
     if (last_media)
         libvlc_media_release(last_media);
     last_media = m; /* our reference: kept for a live pause */
@@ -1915,6 +2139,21 @@ void player_set_decode_mode(DecodeMode mode)
     save_decode_mode();
 }
 
+/* prefs.txt hw_decode (Settings); settings.txt hw_decode=0, the older way, still counts */
+bool player_hw_decoding()
+{
+    return pref_int("hw_decode", setting_int("hw_decode", 1)) != 0;
+}
+
+void player_set_hw_decoding(bool on)
+{
+    pref_set("hw_decode", on ? 1 : 0);
+    if (on)
+        software_path.clear();
+    /* from the next video: switching under a playing one held its picture a
+     * second or more (the user's test) */
+}
+
 bool player_fast_decoding()
 {
     return fast_now;
@@ -1931,8 +2170,10 @@ bool playing_disc_now()
         return true;
     if (url_scheme_is(bare, "dvd") || url_scheme_is(bare, "bluray"))
         return true;
-    return mp && libvlc_media_player_get_title_count(mp) > 1;
+    return asking() && libvlc_media_player_get_title_count(mp) > 1;
 }
+
+static bool live_dropped();
 
 PlayerEvent player_tick()
 {
@@ -1947,12 +2188,64 @@ PlayerEvent player_tick()
             add_ready_subtitle(p.path, p.ready);
     /* a video waiting for the one before to finish stopping */
     if (queued_media && !stopping) {
-        fprintf(stderr, "player: the video before stopped: starting %s\n", current_path.c_str());
+        fprintf(stderr, "player: [%.2f] the video before stopped: starting %s\n", plat_time(), current_path.c_str());
         start_queued();
+    }
+    if (live_dropped()) {
+        live_reconnects++;
+        fprintf(stderr, "player: live stream dropped at %lld of %lld ms: connecting again (%d of 5)\n",
+                (long long)live_last_ms, (long long)live_last_len, live_reconnects);
+        hold_picture = true;
+        std::string path = current_path;
+        stop_in_background();
+        {
+            std::lock_guard<std::mutex> g(audio_lock);
+            audio_clear_locked();
+        }
+        live_reconnecting = true;
+        player_open(path, 0);
+        live_reconnecting = false;
+        return PLAYER_EVENT_NONE;
+    }
+    if (stopping || queued_media)
+        vdec_failed = false; /* the video before's decoder, on its way out */
+    else if (mp && vdec_failed.exchange(false) && !current_path.empty()) {
+        /* the console's decoder gave up on this video: FFmpeg, same place.
+         * At once, not at the next health check (up to 3 s after the start:
+         * the picture stood still that long, VP9 2026-10-13). */
+        fprintf(stderr, "player: reopening %s without hardware decoding\n", current_path.c_str());
+        hold_picture = true;
+        restore_audio = libvlc_audio_get_track(mp);
+        restore_spu = libvlc_video_get_spu(mp);
+        software_path = current_path;
+        int64_t at = libvlc_media_player_get_time(mp);
+        /* given up in its first seconds: from where it started (VLC's clock
+         * had run 2.7 s ahead of the picture, so it reopened further on and
+         * looked frozen, VP9 2026-10-13) */
+        if (plat_time() - opened_at < 6)
+            at = opened_from_ms;
+        std::string path = current_path;
+        stop_in_background(); /* not here: VLC's stop froze the screen 1.5-3 s */
+        {
+            std::lock_guard<std::mutex> g(audio_lock);
+            audio_clear_locked();
+        }
+        player_open(path, at > 0 ? at : 0);
+        return PLAYER_EVENT_NONE;
     }
     if (!mp || t < health.next)
         return PLAYER_EVENT_NONE;
     health.next = t + 1;
+    if (!stopping && !queued_media && state() == libvlc_Playing) {
+        int64_t at = player_time();
+        if (at > 0) {
+            live_last_ms = at;
+            live_last_len = player_length();
+            /* a minute playing since the last reconnect: a fresh count */
+            if (live_reconnects && at > 60000)
+                live_reconnects = 0;
+        }
+    }
     if (state() == libvlc_Playing)
         side_subs_apply();
     if (sub_check_at > 0 && t >= sub_check_at && state() == libvlc_Playing) {
@@ -1963,7 +2256,7 @@ PlayerEvent player_tick()
             int64_t at = libvlc_media_player_get_time(mp);
             std::string path = current_path;
             restore_spu = 1000; /* the last subtitle track: picked below once known */
-            libvlc_media_player_stop(mp);
+            stop_in_background(); /* not here: VLC's stop froze the screen 1.5-3 s */
             {
                 std::lock_guard<std::mutex> g(audio_lock);
                 audio_clear_locked();
@@ -1994,22 +2287,6 @@ PlayerEvent player_tick()
         libvlc_video_set_spu_delay(mp, kept.spu_delay * 1000);
         restore_delays = false;
     }
-    if (vdec_failed.exchange(false) && !current_path.empty()) {
-        /* the console's decoder gave up on this video: FFmpeg, same place */
-        fprintf(stderr, "player: reopening %s without hardware decoding\n", current_path.c_str());
-        restore_audio = libvlc_audio_get_track(mp);
-        restore_spu = libvlc_video_get_spu(mp);
-        software_path = current_path;
-        int64_t at = libvlc_media_player_get_time(mp);
-        std::string path = current_path;
-        libvlc_media_player_stop(mp);
-        {
-            std::lock_guard<std::mutex> g(audio_lock);
-            audio_clear_locked();
-        }
-        player_open(path, at > 0 ? at : 0);
-        return PLAYER_EVENT_NONE;
-    }
     libvlc_media_stats_t s;
     if (!get_stats(&s))
         return PLAYER_EVENT_NONE;
@@ -2032,6 +2309,14 @@ PlayerEvent player_tick()
      * reopen would throw the menus away. */
     if (playing_disc_now())
         playing = false;
+    /* Nor on a network stream: there too few pictures means the server
+     * isn't sending fast enough (BBC America's sent a 4 s piece in 3-12 s,
+     * 2026-10-13), not slow decoding, and the reopen in fast decoding threw
+     * away what had come in: the channel froze from the start. */
+    if (url_scheme_is(current_path, "http") || url_scheme_is(current_path, "https") ||
+        url_scheme_is(current_path, "udp") || url_scheme_is(current_path, "rtp") ||
+        url_scheme_is(current_path, "rtsp") || url_scheme_is(current_path, "mms"))
+        playing = false;
     bool bad = playing && decoded > 0 &&
                (lost > shown || shown < fps * 0.5f);
     health.bad_seconds = bad ? health.bad_seconds + 1 : 0;
@@ -2044,12 +2329,13 @@ PlayerEvent player_tick()
     /* fast decoding is FFmpeg's: nothing to gain on the console's decoder */
     if (!fast_now && decode_mode == DECODE_AUTO && vdec_active == 0) {
         fprintf(stderr, "player: switching %s to fast decoding\n", current_path.c_str());
+        hold_picture = true;
         restore_audio = libvlc_audio_get_track(mp);
         restore_spu = libvlc_video_get_spu(mp);
         fast_path = current_path;
         int64_t at = libvlc_media_player_get_time(mp);
         std::string path = current_path;
-        libvlc_media_player_stop(mp);
+        stop_in_background(); /* not here: VLC's stop froze the screen 1.5-3 s */
         {
             std::lock_guard<std::mutex> g(audio_lock);
             audio_clear_locked();
@@ -2083,8 +2369,30 @@ static libvlc_state_t state()
     return mp ? libvlc_media_player_get_state(mp) : libvlc_NothingSpecial;
 }
 
+static bool is_stream(const std::string &p)
+{
+    return url_scheme_is(p, "http") || url_scheme_is(p, "https") || url_scheme_is(p, "udp") ||
+           url_scheme_is(p, "rtp") || url_scheme_is(p, "rtsp") || url_scheme_is(p, "mms");
+}
+
+/* A stream that played and then ended well before its end (a live channel
+ * has none, or a window it never reaches): dropped, not finished. */
+static bool live_dropped()
+{
+    if (queued_media || stopping || current_path.empty() || live_reconnects >= 5 || !is_stream(current_path))
+        return false;
+    libvlc_state_t s = state();
+    if (s != libvlc_Ended && s != libvlc_Error)
+        return false;
+    if (live_last_ms <= 0)
+        return false; /* never played: offline, not dropped */
+    return live_last_len <= 0 || live_last_ms < live_last_len - 5000;
+}
+
 bool player_active()
 {
+    if (live_dropped())
+        return true; /* about to reconnect */
     libvlc_state_t s = state();
     return live_paused || queued_media || s == libvlc_Opening || s == libvlc_Buffering ||
            s == libvlc_Playing || s == libvlc_Paused;
@@ -2092,8 +2400,8 @@ bool player_active()
 
 bool player_ended()
 {
-    if (queued_media)
-        return false;   /* the next one is about to start */
+    if (queued_media || live_dropped())
+        return false;   /* the next one is about to start, or a reconnect */
     libvlc_state_t s = state();
     return s == libvlc_Ended || s == libvlc_Error;
 }
@@ -2131,7 +2439,7 @@ bool player_in_menu()
         return menu;
     next = now + 0.25;
     menu = false;
-    if (!mp)
+    if (!asking())
         return menu;
     /* A DVD says when menu buttons are on screen ("highlight", set by VLC's
      * dvdnav). A DVD's intro or warning screen is in its menu part too but has
@@ -2174,7 +2482,7 @@ bool player_in_menu()
  * Blu-ray's pop-up menu, over the film. */
 void player_disc_menu(bool popup)
 {
-    if (!mp)
+    if (!asking())
         return;
     if (input_thread_t *input = libvlc_get_input_thread(mp)) {
         vlc_object_t *in = (vlc_object_t *)input;
@@ -2189,7 +2497,7 @@ void player_disc_menu(bool popup)
 bool player_disc_has_popup()
 {
     bool popup = false;
-    if (mp)
+    if (asking())
         if (input_thread_t *input = libvlc_get_input_thread(mp)) {
             vlc_object_t *in = (vlc_object_t *)input;
             popup = var_Type(in, "bluray-popup") != 0 && var_GetBool(in, "bluray-popup");
@@ -2258,12 +2566,12 @@ void player_toggle_pause()
 
 int64_t player_time()
 {
-    return mp ? libvlc_media_player_get_time(mp) : 0;
+    return asking() ? libvlc_media_player_get_time(mp) : 0;
 }
 
 int64_t player_length()
 {
-    int64_t l = mp ? libvlc_media_player_get_length(mp) : 0;
+    int64_t l = asking() ? libvlc_media_player_get_length(mp) : 0;
     return l > 0 ? l : 0;
 }
 
@@ -2297,7 +2605,7 @@ void player_set_volume(int volume)
 
 float player_rate()
 {
-    return mp ? libvlc_media_player_get_rate(mp) : 1.0f;
+    return asking() ? libvlc_media_player_get_rate(mp) : 1.0f;
 }
 
 void player_set_rate(float rate)
@@ -2308,12 +2616,12 @@ void player_set_rate(float rate)
 
 std::vector<Track> player_audio_tracks()
 {
-    return tracks_from(mp ? libvlc_audio_get_track_description(mp) : nullptr);
+    return tracks_from(asking() ? libvlc_audio_get_track_description(mp) : nullptr);
 }
 
 int player_audio_track()
 {
-    return mp ? libvlc_audio_get_track(mp) : -1;
+    return asking() ? libvlc_audio_get_track(mp) : -1;
 }
 
 void player_set_audio_track(int id)
@@ -2325,12 +2633,12 @@ void player_set_audio_track(int id)
 
 std::vector<Track> player_subtitle_tracks()
 {
-    return tracks_from(mp ? libvlc_video_get_spu_description(mp) : nullptr);
+    return tracks_from(asking() ? libvlc_video_get_spu_description(mp) : nullptr);
 }
 
 int player_subtitle_track()
 {
-    return mp ? libvlc_video_get_spu(mp) : -1;
+    return asking() ? libvlc_video_get_spu(mp) : -1;
 }
 
 void player_set_subtitle_track(int id)
@@ -2472,15 +2780,35 @@ void video_upload(VkCommandBuffer cmd)
             slot = shown;
     }
     pic_freed.notify_all();
+    /* reopened: the last picture stays until there's a new one to show */
+    if (gen != planes.generation && gen > 0 && slot < 0 && hold_picture && planes.has_picture)
+        return;
     if (gen != planes.generation && gen > 0) {
+        DIAG("diag: setup %d on screen (was %d): %ux%u%s, picture up %d, hold %d, waiting %d\n", gen,
+                planes.generation, f.width, f.height, f.two_planes ? " two planes" : "",
+                (int)planes.has_picture, (int)hold_picture.load(), slot);
+        hold_picture = false;
         /* The same shape again (the file restarted, Watch again, a loop):
          * the textures stay, and so does the last picture until the next
          * one comes; remade, the video blinked black. */
         bool same = planes.image[0] && f.width == planes.buf_w && f.height == planes.buf_h &&
                     f.ten_bit == planes.ten_bit && f.full_range == planes.full_range &&
                     f.two_planes == planes.two_planes;
-        if (!same && !make_planes(f))
+        DIAG("diag: textures %s\n", same ? "kept (same shape)" : "made new");
+        static double planes_failed_at;
+        if (!same && plat_time() - planes_failed_at < 0.5)
             return;
+        if (!same && !make_planes(f)) {
+            planes_failed_at = plat_time();
+            return;
+        }
+        /* only when the shape changes: 3840x2160 to 3840x2176 with the
+         * same picture in it (hardware to software) skipped a frame for
+         * nothing, a black flash (2026-10-18) */
+        float was = planes.prev_aspect, now_aspect = f.vis_h ? (float)f.vis_w / f.vis_h : 0;
+        if (!same && (was <= 0 || now_aspect <= 0 || fabsf(was / now_aspect - 1) > 0.01f))
+            planes.new_shape_frame = gfx.frame_number;
+        planes.prev_aspect = now_aspect;
         planes.generation = gen;
         planes.colour = f.colour;
     }
@@ -2492,6 +2820,12 @@ void video_upload(VkCommandBuffer cmd)
         if (slots[slot].state != SHOWN)
             return;
         buffer = slots[slot].buffer;
+        if (diag_up < DIAG_PICTURES) {
+            diag_up++;
+            DIAG("diag upload %d: buffer %d, setup %d, frame %llu, luma %u, picture up before %d\n",
+                    diag_up, slot, gen, (unsigned long long)gfx.frame_number + 1, slot_luma(slots[slot], f),
+                    (int)planes.has_picture);
+        }
         slots[slot].state = GPU;
         slots[slot].gpu_frame = gfx.frame_number + 1;
         if (shown == slot)
@@ -2521,30 +2855,81 @@ void video_upload(VkCommandBuffer cmd)
     planes.has_picture = true;
 }
 
+double player_open_age()
+{
+    return plat_time() - opened_at;
+}
+
 bool video_has_picture()
 {
     return planes.has_picture;
 }
 
+const std::string &player_current_path()
+{
+    return current_path;
+}
+
+bool player_match_rate()
+{
+    return pref_int("match_rate", 0) != 0;
+}
+
+void player_set_match_rate(bool on)
+{
+    pref_set("match_rate", on ? 1 : 0);
+}
+
 bool video_wants_hdr_output()
 {
     /* settings.txt hdr_output: 0 never, 1 when the console's output is HDR
-     * (the default), 2 always (a TV the console doesn't report as HDR) */
+     * (the default), 2 always (a TV the console doesn't report as HDR). It
+     * follows the console: trying HDR on an SDR output was taken out
+     * (the user: the PS5 switches the TV itself when it's set to). */
     static const int mode = setting_int("hdr_output", 1);
     if (mode == 0 || !planes.has_picture || planes.colour.transfer == TRC_SDR || !player_active())
         return false;
     return mode == 2 || gfx.display_range == 2;
 }
 
+float video_picture_aspect()
+{
+    return format.vis_w && format.vis_h ? (float)format.vis_w / format.vis_h : 0;
+}
+
 void video_forget_picture()
 {
+    DIAG("diag: [%.2f] picture taken off the screen (was up %d)\n", plat_time(), (int)planes.has_picture);
     planes.has_picture = false;
+    hold_picture = false;
+    /* and a picture of it still waiting to go up */
+    std::lock_guard<std::mutex> g(pic_lock);
+    if (shown >= 0 && slots[shown].state == SHOWN)
+        slots[shown].state = FREE;
+    shown = -1;
 }
 
 void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
 {
     if (!planes.has_picture)
         return;
+    /* A new shape's first frame: the rectangle was worked out before the
+     * picture came, from the video before's shape. With the console's
+     * decoder the size and the first picture come in the same frame, and a
+     * portrait video flashed stretched over the whole screen after a 16:9
+     * one ("a frame from another video", caught by the log 2026-10-18).
+     * Nothing this one frame; the next is placed right. */
+    if (planes.new_shape_frame == gfx.frame_number) {
+        DIAG("diag draw: frame %llu skipped, the rectangle is the shape before's\n",
+                (unsigned long long)gfx.frame_number);
+        return;
+    }
+    if (diag_draws < 6) {
+        diag_draws++;
+        DIAG("diag draw: frame %llu, textures of setup %d (now %d), %ux%u at %.0f,%.0f %.0fx%.0f\n",
+                (unsigned long long)gfx.frame_number, planes.generation, generation, planes.buf_w,
+                planes.buf_h, x, y, w, h);
+    }
     const VideoInfo &v = player_video_info();
     Push p = {};
     /* The matrix VLC names; if it doesn't, BT.709 for HD and BT.601 for SD. */
@@ -2576,11 +2961,11 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
         p.view[2] = tanf(view_fov * 3.14159265f / 360);
         p.view[3] = h > 0 ? w / h : 16.0f / 9;
     }
-    /* The whole buffer is picture: vmem's pictures fill the size it set up
-     * (1024x560 arrives stretched to 1024x578), so nothing is cut; the
-     * rectangle has the picture's real shape. */
-    p.uv_scale[0] = 1;
-    p.uv_scale[1] = 1;
+    /* Only the picture, not the decoder's padding rows (1280x720 of a
+     * 1280x736 buffer): vmem passes the buffer as it is (patches/0018)
+     * instead of VLC scaling every picture to fill it on the CPU. */
+    p.uv_scale[0] = planes.buf_w ? (float)planes.vis_w / planes.buf_w : 1.0f;
+    p.uv_scale[1] = planes.buf_h ? (float)planes.vis_h / planes.buf_h : 1.0f;
     VkViewport vp = { x, y, w, h, 0, 1 };
     /* The scissor stays on screen ("Fill" makes the rectangle larger than it). */
     float sx0 = x < 0 ? 0 : x, sy0 = y < 0 ? 0 : y;
@@ -2606,7 +2991,7 @@ void player_view(float yaw, float pitch, float fov)
 
 int64_t player_audio_delay()
 {
-    return mp ? libvlc_audio_get_delay(mp) / 1000 : 0;
+    return asking() ? libvlc_audio_get_delay(mp) / 1000 : 0;
 }
 
 void player_set_audio_delay(int64_t ms)
@@ -2618,7 +3003,7 @@ void player_set_audio_delay(int64_t ms)
 
 int64_t player_subtitle_delay()
 {
-    return mp ? libvlc_video_get_spu_delay(mp) / 1000 : 0;
+    return asking() ? libvlc_video_get_spu_delay(mp) / 1000 : 0;
 }
 
 void player_set_subtitle_delay(int64_t ms)
@@ -2642,7 +3027,7 @@ static bool title_is_menu(int title)
 
 std::vector<Chapter> player_chapters()
 {
-    if (!mp)
+    if (!asking())
         return chapters_cache;
     /* A disc moves between titles (menu, intro, the film): each has its own
      * chapters, so the list is read again when the title changes. */
@@ -2676,7 +3061,7 @@ std::vector<Chapter> player_chapters()
 
 int player_chapter()
 {
-    return mp ? libvlc_media_player_get_chapter(mp) : -1;
+    return asking() ? libvlc_media_player_get_chapter(mp) : -1;
 }
 
 void player_set_chapter(int index)
@@ -2702,8 +3087,8 @@ bool player_screenshot(const std::string &path)
         shot.data.assign(slots[last_slot].mapped, slots[last_slot].mapped + format.size);
     }
     /* the whole buffer: the picture fills it (see video_draw) */
-    shot.w = shot.f.width;
-    shot.h = shot.f.height;
+    shot.w = shot.f.vis_w ? shot.f.vis_w : shot.f.width;
+    shot.h = shot.f.vis_h ? shot.f.vis_h : shot.f.height;
     shot.path = path;
     std::thread(shot_main, std::move(shot)).detach();
     return true;

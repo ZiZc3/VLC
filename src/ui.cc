@@ -171,9 +171,11 @@ std::string vlc_message(const std::string &m)
     }
     if (m.compare(0, 14, "Please provide") == 0)
         return "A Windows PC takes its own account; a NAS, the user you made on it.";
-    /* libbluray without a JVM (none runs on the console): not "install Java" */
+    /* libbluray without a JVM (none runs on the console): not "install Java".
+     * Said plainly: "it plays without them" promised a film that often
+     * didn't come (the user, 2026-10-18). */
     if (m.compare(0, 30, "This Blu-ray disc requires Java") == 0)
-        return "This Blu-ray's menus are made in Java, which the PS5 can't run: it plays without them";
+        return "Java Blu-ray discs (BD-J) aren't supported on the PS5";
     if (m.compare(0, 6, "Track ") == 0 && m.size() > 6 && isdigit((unsigned char)m[6]))
         return trf("Track %d", atoi(m.c_str() + 6));
     return m;
@@ -542,6 +544,15 @@ void ci_add(float cx, float cy, float s)
     circle(cx + s * 0.3f, cy + s * 0.26f, s * 0.2f, C_ORANGE);
     rect(cx + s * 0.21f, cy + s * 0.24f, s * 0.18f, s * 0.045f, IM_COL32(255, 255, 255, 255));
     rect(cx + s * 0.278f, cy + s * 0.17f, s * 0.045f, s * 0.18f, IM_COL32(255, 255, 255, 255));
+}
+
+void icon_link(float cx, float cy, float s, ImU32 col);
+
+/* Open a network link: a blue disc with a chain link */
+void ci_link(float cx, float cy, float s)
+{
+    circle(cx, cy, s * 0.38f, IM_COL32(52, 120, 214, 255));
+    icon_link(cx, cy, s * 0.46f, IM_COL32(255, 255, 255, 255));
 }
 
 /* ---- icons, drawn so they stay sharp at any size ----------------------------------- */
@@ -1020,7 +1031,7 @@ void rebuild_lists()
 
 /* Network places in Browse: a server (saved SMB share or DLNA server), a
  * folder or file on it, and "Add a network share". */
-enum { NET_NONE, NET_SERVER, NET_DIR, NET_FILE, NET_ADD, NET_ONLINE };
+enum { NET_NONE, NET_SERVER, NET_DIR, NET_FILE, NET_ADD, NET_ONLINE, NET_LINK };
 
 struct BrowseEntry {
     std::string name, path;
@@ -1122,6 +1133,7 @@ void rebuild_browse()
         for (const NetServer &sv : net_servers())
             browse_entries.push_back({ sv.name, sv.url, true, -1, false, NET_SERVER });
         browse_entries.push_back({ "Add a network share", "", false, -1, false, NET_ADD });
+        browse_entries.push_back({ "Open a network link", "", false, -1, false, NET_LINK });
         browse_entries.push_back({ "Free TV channels", "tv:", true, -1, false, NET_ONLINE });
         browse_entries.push_back({ "Internet radio", "radio:", true, -1, false, NET_ONLINE });
         return;
@@ -1253,8 +1265,11 @@ void save_position(bool finished)
 {
     if (playing_path.empty() || is_link(playing_path))
         return;
-    int64_t t = finished ? 0 : player_time();
-    library_set_resume(playing_path, t, player_length());
+    int64_t t = finished ? 0 : player_time(), len = player_length();
+    /* nothing known (the player busy stopping): the saved spot stays */
+    if (!finished && len <= 0)
+        return;
+    library_set_resume(playing_path, t, len);
 }
 
 void leave_player(bool finished)
@@ -2446,6 +2461,7 @@ std::vector<std::pair<uint32_t, const char *>> playlist_hints()
 void start_stream(const std::string &url, const std::vector<std::string> &options = {}, bool remember = true,
                   const std::string &name = "", libvlc_media_t *media = nullptr);
 void open_add_share();
+void open_link();
 
 void spinner(float cx, float cy, float r);
 
@@ -2603,7 +2619,7 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
     if (e.net == NET_SERVER) {
         *type = net_is_saved_server(e.path) ? "Network share (SMB)" : "Media server (DLNA)";
         *group = 1;
-    } else if (e.net == NET_ADD) {
+    } else if (e.net == NET_ADD || e.net == NET_LINK) {
         *type = "";
         *group = 1;
     } else if (e.net == NET_ONLINE) {
@@ -2669,6 +2685,8 @@ void classic_icon(const BrowseEntry &e, float cx, float cy, float s)
         ci_server(cx, cy, s);
     else if (e.net == NET_ADD)
         ci_add(cx, cy, s);
+    else if (e.net == NET_LINK)
+        ci_link(cx, cy, s);
     else if (e.net == NET_ONLINE)
         e.path == "tv:" ? ci_tv(cx, cy, s) : ci_radio(cx, cy, s);
     else if (e.net == NET_FILE)
@@ -2908,6 +2926,8 @@ void mini_player()
     text(f_reg, 17, kx + 46, y + 17, C_DIM, "Open");
 }
 
+void open_search(const std::string &text = "");
+
 void tab_browse()
 {
     /* The network listing or the servers found changed: rebuild. */
@@ -2976,6 +2996,8 @@ void tab_browse()
         BrowseEntry e = browse_entries[browse_focus];
         if (e.net == NET_ADD) {
             open_add_share();
+        } else if (e.net == NET_LINK) {
+            open_link();
         } else if (e.net == NET_SERVER || e.net == NET_DIR || e.net == NET_ONLINE) {
             net_enter(e.path, e.name);
         } else {
@@ -3084,6 +3106,8 @@ void tab_browse()
             icon_radio(146, y + 33, 34, mix(C_DIM, C_ORANGE, f));
         else if (e.net == NET_ADD)
             icon_plus_circle(146, y + 33, 32, mix(C_DIM, C_ORANGE, f));
+        else if (e.net == NET_LINK)
+            icon_link(146, y + 33, 30, mix(C_DIM, C_ORANGE, f));
         else if (e.net == NET_FILE) {
             int k = name_kind(e.name);
             if (k == 1)
@@ -3322,8 +3346,16 @@ void kb_backspace()
 
 /* Draws the keyboard at (x, y), w wide; handles the buttons when it has the
  * focus. Returns true on Done. *leave_up: ↑ was pressed on the top row. */
+#ifdef VLCPS5_HOST
+extern "C" const char *plat_take_typed(void); /* the test script's "type" steps */
+#endif
+
 bool kb_frame(float x, float y, float w, bool focused, float a, bool *leave_up)
 {
+#ifdef VLCPS5_HOST
+    if (const char *typed = plat_take_typed())
+        kb.text += typed;
+#endif
     const float gap = 10, kh = 62;
     float kw = (w - 9 * gap) / 10;
     std::vector<int> bottom = kb_bottom();
@@ -3474,15 +3506,24 @@ void text_box(float x, float y, float w, const char *placeholder, float a, bool 
 
 /* ---- Search and Open a network link -------------------------------------------- */
 
+enum FoundKind { F_ITEM, F_PLAYLIST, F_BROWSE, F_SERVER, F_LINK, F_TV, F_STATION, F_BUSY };
 struct Found {
-    int item;       /* library index, or -1 */
-    int playlist;   /* playlist index, or -1 */
-    std::string link;
+    int kind;
+    int index = -1;  /* library item, playlist or Browse entry */
+    std::string link; /* a server's or a recent link's address */
 };
 std::vector<Found> found;
 int found_focus;
 bool in_list;       /* focus on the list (above the keyboard) */
 std::string found_for = "\x01";
+int found_serial = -1;    /* the Browse network listing searched */
+int found_online = -1;    /* the online results searched (net_search_serial) */
+
+/* Searching from inside a network list (a channel list, a share): its entries too. */
+bool search_in_browse()
+{
+    return screen == LIBRARY && tab == BROWSE && !net_path.empty() && !sub_pick;
+}
 
 std::string lower_ascii(std::string s)
 {
@@ -3491,26 +3532,78 @@ std::string lower_ascii(std::string s)
     return s;
 }
 
+std::vector<std::string> recent_links();
+std::string link_name(const std::string &url);
+
+/* Everything the app knows by name: the list open in Browse (channels, a
+ * share's folder), playlists, videos and songs, saved shares and servers,
+ * recent links, and the online lists (every free TV channel, radio stations
+ * by name). */
 void update_search()
 {
-    if (found_for == kb.text)
+    int serial = search_in_browse() ? net_list_serial() : -1;
+    net_search_typed(kb.text);
+    int online = net_search_serial() * 2 + (net_search_busy() ? 1 : 0);
+    if (found_for == kb.text && found_serial == serial && found_online == online)
         return;
+    bool typed = found_for != kb.text;
     found_for = kb.text;
+    found_serial = serial;
+    found_online = online;
     found.clear();
+    if (typed)
+        found_focus = 0;
     std::string q = lower_ascii(kb.text);
     while (!q.empty() && q.back() == ' ')
         q.pop_back();
+    while (!q.empty() && q[0] == ' ')
+        q.erase(0, 1);
     if (q.empty())
         return;
+    auto has = [&](const std::string &name) { return lower_ascii(name).find(q) != std::string::npos; };
+    if (serial >= 0) {
+        /* The list open in Browse first: that's what is being looked through. */
+        int got = 0;
+        for (int i = 0; i < (int)browse_entries.size() && got < 200; i++)
+            if (browse_entries[i].net != NET_NONE && browse_entries[i].net != NET_ADD && browse_entries[i].net != NET_LINK && has(browse_entries[i].name)) {
+                found.push_back({ F_BROWSE, i });
+                got++;
+            }
+    }
     auto &pls = library_playlists();
     for (int i = 0; i < (int)pls.size(); i++)
-        if (lower_ascii(pls[i].name).find(q) != std::string::npos)
-            found.push_back({ -1, i, "" });
-    for (int i = 0; i < (int)L().size() && found.size() < 60; i++)
-        if (lower_ascii(L()[i].name).find(q) != std::string::npos ||
-            lower_ascii(L()[i].folder.substr(L()[i].folder.rfind('/') + 1)).find(q) != std::string::npos)
-            found.push_back({ i, -1, "" });
-    found_focus = 0;
+        if (has(pls[i].name))
+            found.push_back({ F_PLAYLIST, i });
+    int items = 0;
+    for (int i = 0; i < (int)L().size() && items < 100; i++)
+        if (has(L()[i].name) || has(L()[i].folder.substr(L()[i].folder.rfind('/') + 1))) {
+            found.push_back({ F_ITEM, i });
+            items++;
+        }
+    for (const NetServer &sv : net_servers())
+        if (has(sv.name) || has(sv.url))
+            found.push_back({ F_SERVER, -1, sv.url });
+    for (const std::string &l : recent_links())
+        if (has(link_name(l)) || has(l))
+            found.push_back({ F_LINK, -1, l });
+    /* Online, as it comes: free TV channels and radio stations, played
+     * straight from here */
+    if (q.size() >= 2) {
+        const std::vector<NetEntry> &tv = net_search_tv();
+        int got = 0;
+        for (int i = 0; i < (int)tv.size() && got < 60; i++)
+            if (has(tv[i].name)) {
+                found.push_back({ F_TV, i });
+                got++;
+            }
+        const std::vector<NetEntry> &radio = net_search_radio();
+        for (int i = 0; i < (int)radio.size() && i < 40; i++)
+            found.push_back({ F_STATION, i });
+        if (net_search_busy())
+            found.push_back({ F_BUSY });
+    }
+    if (found_focus >= (int)found.size())
+        found_focus = found.empty() ? 0 : (int)found.size() - 1;
 }
 
 /* Recent links, newest first: cache/links.txt. */
@@ -3626,9 +3719,9 @@ void start_stream(const std::string &url, const std::vector<std::string> &option
     was_active = false;
 }
 
-void open_search()
+void open_search(const std::string &text)
 {
-    kb_open("", false);
+    kb_open(text, false);
     found_for = "\x01";
     in_list = false;
     modal = SEARCH;
@@ -4424,12 +4517,46 @@ void modal_text_screen()
         std::string title, sub;
         if (search) {
             const Found &r = found[i];
-            if (r.playlist >= 0) {
+            if (r.kind == F_TV) {
+                icon_tv(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                title = net_search_tv()[r.index].name;
+                sub = tr("Free TV channels");
+            } else if (r.kind == F_STATION) {
+                icon_radio(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                title = net_search_radio()[r.index].name;
+                sub = tr("Internet radio");
+            } else if (r.kind == F_BUSY) {
+                spinner(x + 22, ry + 26, 12);
+                title = tr("Looking for channels and stations\xE2\x80\xA6");
+            } else if (r.kind == F_SERVER) {
+                icon_server(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                title = r.link;
+                for (const NetServer &sv : net_servers())
+                    if (sv.url == r.link)
+                        title = sv.name;
+                sub = tr("Network");
+            } else if (r.kind == F_LINK) {
+                icon_link(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                title = link_name(r.link);
+                sub = r.link;
+            } else if (r.kind == F_BROWSE) {
+                const BrowseEntry &b = browse_entries[r.index];
+                if (b.dir)
+                    icon_folder(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                else if (net_path[0].first.compare(0, 3, "tv:") == 0)
+                    icon_tv(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                else if (net_path[0].first.compare(0, 6, "radio:") == 0)
+                    icon_radio(x + 22, ry + 26, 28, alpha(C_DIM, a));
+                else
+                    icon_film(x + 22, ry + 26, 30, alpha(C_DIM, a));
+                title = b.name;
+                sub = net_path.back().second;
+            } else if (r.kind == F_PLAYLIST) {
                 icon_list(x + 22, ry + 26, 28, alpha(C_DIM, a));
-                title = library_playlists()[r.playlist].name;
+                title = library_playlists()[r.index].name;
                 sub = "Playlist";
             } else {
-                const MediaItem &m = L()[r.item];
+                const MediaItem &m = L()[r.index];
                 if (m.audio)
                     icon_note(x + 22, ry + 26, 26, alpha(C_DIM, a));
                 else
@@ -4456,14 +4583,41 @@ void modal_text_screen()
         if (search) {
             Found r = found[found_focus];
             modal = NONE;
-            if (r.playlist >= 0) {
-                play_playlist(library_playlists()[r.playlist].path);
+            if (r.kind == F_BUSY) {
+                modal = SEARCH; /* nothing to open yet: stay */
+            } else if (r.kind == F_TV || r.kind == F_STATION) {
+                const NetEntry e = (r.kind == F_TV ? net_search_tv() : net_search_radio())[r.index];
+                start_stream(e.url, e.options, false, e.name, net_search_media(e.url));
+            } else if (r.kind == F_SERVER) {
+                /* a place of Browse, opened from its top (○ walks back up) */
+                screen = LIBRARY;
+                screen_fade = 0;
+                tab = BROWSE;
+                net_path.clear();
+                browse_dir.clear();
+                std::string name = r.link;
+                for (const NetServer &sv : net_servers())
+                    if (sv.url == r.link)
+                        name = sv.name;
+                net_enter(r.link, name);
+            } else if (r.kind == F_LINK) {
+                start_stream(r.link);
+            } else if (r.kind == F_BROWSE) {
+                /* as ✕ on that row of Browse */
+                BrowseEntry e = browse_entries[r.index];
+                browse_focus = r.index;
+                if (e.dir)
+                    net_enter(e.path, e.name);
+                else
+                    start_stream(e.path, net_login_options(e.path), false, e.name, net_take_media(e.path));
+            } else if (r.kind == F_PLAYLIST) {
+                play_playlist(library_playlists()[r.index].path);
             } else {
                 std::vector<int> list;
                 for (const Found &x2 : found)
-                    if (x2.item >= 0 && (!L()[x2.item].other || x2.item == r.item))
-                        list.push_back(x2.item);
-                open_item(r.item, list);
+                    if (x2.kind == F_ITEM && (!L()[x2.index].other || x2.index == r.index))
+                        list.push_back(x2.index);
+                open_item(r.index, list);
             }
         } else {
             std::string url = links[found_focus];
@@ -4621,10 +4775,10 @@ void modal_options()
     };
     std::vector<Item> items;
     if (in_player)
-        items = { { "Resume", OI_RESUME }, { "Audio, subtitles and more", OI_TRACKS },
+        items = { { "Resume", OI_RESUME }, { "Audio, subtitles and more", OI_TRACKS }, { "Search", OI_SEARCH },
                   { "Send files from a phone or PC", OI_PHONE }, { "Settings", OI_SETTINGS }, { "Stop playback", OI_STOP } };
     else
-        items = { { "Search", OI_SEARCH }, { "Open a network link", OI_LINK },
+        items = { { "Search", OI_SEARCH },
                   { "Send files from a phone or PC", OI_PHONE }, { "Settings", OI_SETTINGS },
                   { "Rescan media", OI_RESCAN } };
     /* the file in front of you: into a playlist */
@@ -4759,13 +4913,14 @@ void setup_begin(bool with_logo);
 enum {
     ST_DECODING, ST_ALANG, ST_SLANG, ST_SOUND, ST_NIGHT, ST_SPEAKERS, ST_THEME, ST_HAPTICS,
     ST_SWIPES, ST_REPEAT, ST_SHUFFLE, ST_DEBUG, ST_STORAGE, ST_VERSION, ST_RELOAD, ST_ABOUT,
-    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_COUNT
+    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_COUNT
 };
 const char *const st_labels[ST_COUNT] = {
     "Decoding", "Audio language", "Subtitle language", "Sound output", "Night mode",
     "Speaker test", "Theme", "Controller vibration", "Touchpad swipes", "Repeat the list", "Shuffle",
     "Detailed log", "Storage", "Version", "Reload drives", "About VLC", "Phone access", "Look",
-    "Subtitle downloads", "Language", "Run setup again", "Blu-ray region",
+    "Subtitle downloads", "Language", "Run setup again", "Blu-ray region", "Hardware decoding",
+    "Match frame rate",
 };
 /* One line under the focused setting: what it does. */
 const char *const st_help[ST_COUNT] = {
@@ -4791,6 +4946,8 @@ const char *const st_help[ST_COUNT] = {
     "The language of VLC's menus",
     "Language, look and playback, chosen again",
     "A: the Americas and East Asia. B: Europe, Africa and Oceania. C: China, Russia and India",
+    "The console's video chip. Off: the processor decodes, slower for 4K",
+    "Films play at their own 24, 25 or 50 Hz: smoother pans. Some TVs go black a moment",
 };
 
 /* Categories: an icon, a name, and their settings. */
@@ -4799,15 +4956,17 @@ struct SettingsCat {
     int icon;
     std::vector<int> rows;
 };
-enum { SI_PLAY, SI_SOUND, SI_THEME, SI_LIST, SI_GEAR };
+enum { SI_PLAY, SI_SOUND, SI_THEME, SI_LIST, SI_GEAR, SI_VIDEO };
 const SettingsCat settings_cats[] = {
-    { "Playback", SI_PLAY, { ST_DECODING, ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION } },
+    { "Playback", SI_PLAY, { ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION } },
+    { "Video", SI_VIDEO, { ST_HWDEC, ST_MATCH, ST_DECODING } },
     { "Sound", SI_SOUND, { ST_SOUND, ST_NIGHT, ST_SPEAKERS } },
     { "Interface", SI_THEME, { ST_UILANG, ST_LOOK, ST_THEME, ST_SWIPES } },
     { "Playlists", SI_LIST, { ST_REPEAT, ST_SHUFFLE } },
-    { "System", SI_GEAR, { ST_WEB, ST_STORAGE, ST_RELOAD, ST_SETUP, ST_DEBUG, ST_ABOUT } },
+    /* (no "Log details" row: the detailed log is for test builds, settings.txt debug=1) */
+    { "System", SI_GEAR, { ST_WEB, ST_STORAGE, ST_RELOAD, ST_SETUP, ST_ABOUT } },
 };
-const int SETTINGS_CATS = 5;
+const int SETTINGS_CATS = 6;
 
 /* ---- settings icons: thin outlines, like the tab bar's ---------------------- */
 
@@ -4916,6 +5075,7 @@ void category_icon(int icon, float cx, float cy, float s, ImU32 col)
     case SI_SOUND: icon_speaker(cx, cy, s * 0.9f, col); break;
     case SI_THEME: si_palette(cx, cy, s, col); break;
     case SI_LIST: icon_list(cx, cy, s * 0.9f, col); break;
+    case SI_VIDEO: icon_film(cx, cy, s * 0.9f, col); break;
     default: icon_gear(cx, cy, s * 0.8f, col); break;
     }
 }
@@ -4923,7 +5083,8 @@ void category_icon(int icon, float cx, float cy, float s, ImU32 col)
 void setting_icon(int id, float cx, float cy, float s, ImU32 col)
 {
     switch (id) {
-    case ST_DECODING: si_chip(cx, cy, s, col); break;
+    case ST_DECODING: case ST_HWDEC: si_chip(cx, cy, s, col); break;
+    case ST_MATCH: icon_speed(cx, cy, s * 0.8f, col); break;
     case ST_ALANG: case ST_UILANG: si_globe(cx, cy, s, col); break;
     case ST_SLANG: case ST_OSUB: icon_cc(cx, cy, s * 0.9f, col); break;
     case ST_BDREGION: si_globe(cx, cy, s, col); break;
@@ -4970,6 +5131,8 @@ std::string st_value(int id)
     static const char *const dec[] = { "Auto (fast when needed)", "Always fast", "Full quality" };
     switch (id) {
     case ST_DECODING: return dec[player_decode_mode()];
+    case ST_HWDEC: return player_hw_decoding() ? "On" : "Off";
+    case ST_MATCH: return player_match_rate() ? "On" : "Off";
     case ST_ALANG: return lang_name(player_audio_language(), false);
     case ST_SLANG: return lang_name(player_sub_language(), true);
     case ST_SOUND: return player_audio_output() ? "Surround 5.1 / 7.1" : "Stereo";
@@ -5008,6 +5171,12 @@ void st_change(int id, int step)
     switch (id) {
     case ST_DECODING:
         player_set_decode_mode((DecodeMode)((player_decode_mode() + 3 + dir) % 3));
+        break;
+    case ST_MATCH: player_set_match_rate(!player_match_rate()); break;
+    case ST_HWDEC:
+        player_set_hw_decoding(!player_hw_decoding());
+        if (player_active())
+            toast("Hardware decoding: from the next video", 2.5);
         break;
     case ST_ALANG: cycle_language(false, dir); break;
     case ST_SLANG: cycle_language(true, dir); break;
@@ -5282,7 +5451,7 @@ void modal_speakers()
     if (hit(PAD_CIRCLE)) {
         player_speaker_test(-1);
         modal = SETTINGS;
-        settings_cat = 1;
+        settings_cat = 2; /* Sound */
         settings_inside = true;
         modal_focus = 2;
         return;
@@ -6115,7 +6284,12 @@ void compute_video_rect()
         vid_rect[3] = sh;
         return;
     }
-    float aspect = v.aspect > 0 ? v.aspect : 16.0f / 9;
+    /* until the video's info is read (a frame or two after its first
+     * picture), the picture's own shape: 16:9 there stretched a portrait
+     * video over the whole screen for its first frames (it looked like
+     * another video flashing by) */
+    float pic_aspect = video_picture_aspect();
+    float aspect = v.aspect > 0 ? v.aspect : pic_aspect > 0 ? pic_aspect : 16.0f / 9;
     if (aspect_mode == PIC_16_9)
         aspect = 16.0f / 9;
     else if (aspect_mode == PIC_4_3)
@@ -7876,7 +8050,8 @@ void ui_frame(const PadState &pad, float frame_dt)
         mini_player();
         if (modal == NONE) {
             bool open_kind = tab == BROWSE && browse_focus < (int)browse_entries.size() &&
-                             (browse_entries[browse_focus].dir || browse_entries[browse_focus].net == NET_ADD);
+                             (browse_entries[browse_focus].dir || browse_entries[browse_focus].net == NET_ADD ||
+                              browse_entries[browse_focus].net == NET_LINK);
             std::vector<std::pair<uint32_t, const char *>> h = { { PAD_CROSS, open_kind ? "Open" : "Play" } };
             int fi = focused_item();
             if (fi >= 0 && L()[fi].other) {

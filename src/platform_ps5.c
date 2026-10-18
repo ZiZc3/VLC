@@ -166,6 +166,7 @@ static int boot_setting(const char *key, int fallback)
  * hw_decode=0 not at all. */
 int sceSysmoduleLoadModule(uint16_t id);
 void vlc_ps5_vdec_prepare(void) __attribute__((weak));   /* ps5/modules/ps5vdec.c */
+void vlc_ps5_vdec_probe(const char *when) __attribute__((weak));
 #define SYSMODULE_VIDEODEC2 207
 static bool vdec_ready;
 static double jb_wait = 2.5;   /* seconds the Helper has to answer */
@@ -193,6 +194,8 @@ static void load_video_decoder(void)
     /* its compute queue now too, while still in the sandbox */
     if (vdec_ready && vlc_ps5_vdec_prepare)
         vlc_ps5_vdec_prepare();
+    if (vdec_ready && vlc_ps5_vdec_probe)
+        vlc_ps5_vdec_probe(plat_full_access() ? "after full access" : "before full access");
 }
 
 int vlc_ps5_vdec_available(void)
@@ -527,6 +530,8 @@ void plat_init(void)
     request_full_access();
     if (hw_decode && vdec_load != 1)
         load_video_decoder();
+    else if (vdec_ready && vlc_ps5_vdec_probe && plat_full_access())
+        vlc_ps5_vdec_probe("after full access");
     use_app_dir();
 }
 

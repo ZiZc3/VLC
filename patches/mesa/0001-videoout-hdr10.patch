@@ -47,7 +47,7 @@
  /* The display and its modes: one each per process, as VideoOut is. */
  struct wsi_videoout_mode {
     uint32_t refresh_millihertz;
-@@ -399,6 +437,54 @@
+@@ -399,6 +437,89 @@
     return VK_SUCCESS;
  }
  
@@ -94,6 +94,41 @@
 +      result = rc == 0 ? (int)status.dynamic_range : -1;
 +      fprintf(stderr, "wsi/videoout: output status 0x%08x: range %u, flags 0x%" PRIx64 "\n", (unsigned)rc,
 +              status.dynamic_range, status.flags);
++   }
++   mtx_unlock(&out->lock);
++   return result;
++}
++
++/*
++ * VLC-PS5: the output's refresh for films, as VideoOut's output modes number
++ * it: 2 (23.976 Hz), 3 (24 Hz), 9 (50 Hz), 1 (back to the default). Asked
++ * first whether the output takes it; then the vblank period measured, in
++ * microseconds, into *period_us (0 if not changed). 0 when VideoOut took it.
++ */
++int vlcps5_wsi_videoout_set_refresh(int mode, int *period_us);
++
++int
++vlcps5_wsi_videoout_set_refresh(int mode, int *period_us)
++{
++   struct wsi_videoout_output *out = &videoout_output;
++   int result = -1;
++   if (period_us)
++      *period_us = 0;
++   mtx_lock(&out->lock);
++   if (videoout_open_locked()) {
++      const int supported = mode == (int)PS5_VIDEO_OUT_MODE_RESTORE
++                               ? 1
++                               : sceVideoOutIsOutputSupported(out->handle, (uint32_t)mode, NULL, NULL, NULL);
++      result = supported > 0 ? sceVideoOutConfigureOutput(out->handle, (uint32_t)mode, NULL, NULL, NULL)
++                             : (supported < 0 ? supported : -2);
++      int measured = 0;
++      if (result == 0)
++         measured = (int)(videoout_vblank_period_ns(out->handle) / 1000);
++      if (period_us)
++         *period_us = measured;
++      fprintf(stderr, "wsi/videoout: output mode %d: %s (0x%08x), a vblank every %.3f ms\n", mode,
++              result == 0 ? "taken" : supported > 0 ? "refused" : "not supported", (unsigned)result,
++              measured / 1000.0);
 +   }
 +   mtx_unlock(&out->lock);
 +   return result;

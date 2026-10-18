@@ -34,3 +34,6 @@ OsubState osub_state();
 std::vector<SubResult> osub_results();
 std::string osub_message();     /* what went wrong, or "12 downloads left today" */
 std::string osub_saved_path();  /* the file a download wrote, once */
+
+/* A plain HTTPS GET (redirects followed; blocking: a background thread's). */
+bool web_https_get(const std::string &url, std::string &body, std::string &error);

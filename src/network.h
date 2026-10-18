@@ -23,6 +23,7 @@ struct NetEntry {
     std::string url;   /* no login in it: net_login_options() gives it */
     bool dir;
     libvlc_media_t *media = nullptr; /* VLC's own item (keeps a list's #EXTVLCOPT) */
+    std::vector<std::string> options; /* or a list's #EXTVLCOPT as media options (":http-referrer=...") */
 };
 
 enum NetListState { NET_IDLE, NET_LOADING, NET_READY, NET_FAILED };
@@ -59,6 +60,15 @@ libvlc_media_t *net_take_media(const std::string &url);
 
 /* The media options that log in to an address's saved share (":smb-user=..."). */
 std::vector<std::string> net_login_options(const std::string &url);
+
+/* Search, as it's typed: every free TV channel (the whole list, fetched once a
+ * session) and radio stations by name (asked once the typing pauses). */
+void net_search_typed(const std::string &query);
+bool net_search_busy();
+int net_search_serial();   /* changes when results arrive */
+const std::vector<NetEntry> &net_search_tv();
+const std::vector<NetEntry> &net_search_radio();
+libvlc_media_t *net_search_media(const std::string &url); /* with a reference, or null */
 
 /* What VLC is asking (login / question), answered from the interface. */
 NetAsk net_ask();

@@ -15,6 +15,7 @@
 
 #include <vlc/vlc.h>
 
+#include "osub.h"
 #include "platform.h"
 #include "player.h"
 
@@ -391,6 +392,199 @@ bool list_menu(const std::string &url)
     return true;
 }
 
+/* ---- search: every free TV channel and radio stations by name, fetched in
+ * the background while Search is typed into (not through Browse) ---- */
+
+struct Fetch {
+    libvlc_media_t *m = nullptr;
+    bool loading = false;
+    std::string url;
+    std::vector<NetEntry> got;
+};
+Fetch radio_found;
+int search_serial; /* changes when search results arrive */
+
+/* Every free TV channel for Search: index.m3u downloaded and read here, as
+ * names, addresses and options only. Kept as VLC media (11,000 of them, each
+ * with its locks), it and the same list open in Browse ran the console out
+ * of mutexes: VLC aborts when it can't make one (crash, 2026-10-13). */
+std::vector<NetEntry> tv_list;           /* main thread */
+std::mutex tv_lock;
+std::vector<NetEntry> tv_arrived;        /* from the download thread */
+bool tv_has_arrived, tv_loading, tv_started;
+std::thread tv_thread;
+
+std::vector<NetEntry> parse_m3u(const std::string &text)
+{
+    std::vector<NetEntry> out;
+    std::string name;
+    std::vector<std::string> opts;
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t eol = text.find('\n', at);
+        if (eol == std::string::npos)
+            eol = text.size();
+        std::string line = text.substr(at, eol - at);
+        at = eol + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line.empty())
+            continue;
+        if (line.compare(0, 8, "#EXTINF:") == 0) {
+            /* the name: after the first comma outside the attributes' quotes */
+            bool quoted = false;
+            size_t comma = std::string::npos;
+            for (size_t i = 8; i < line.size(); i++) {
+                if (line[i] == '"')
+                    quoted = !quoted;
+                else if (line[i] == ',' && !quoted) {
+                    comma = i;
+                    break;
+                }
+            }
+            name = comma == std::string::npos ? "" : line.substr(comma + 1);
+            while (!name.empty() && name[0] == ' ')
+                name.erase(0, 1);
+        } else if (line.compare(0, 11, "#EXTVLCOPT:") == 0) {
+            opts.push_back(":" + line.substr(11));
+        } else if (line[0] != '#') {
+            NetEntry e;
+            e.url = line;
+            e.name = name.empty() ? line : name;
+            e.dir = false;
+            e.options.swap(opts);
+            out.push_back(std::move(e));
+            name.clear();
+            opts.clear();
+        }
+    }
+    return out;
+}
+
+void tv_start_download()
+{
+    if (tv_started)
+        return;
+    tv_started = true;
+    tv_loading = true;
+    search_serial++;
+    std::string url = std::string(TV_LISTS) + "index.m3u";
+    fprintf(stderr, "net: search fetching %s\n", url.c_str());
+    tv_thread = std::thread([url] {
+        std::string body, error;
+        std::vector<NetEntry> got;
+        if (web_https_get(url, body, error))
+            got = parse_m3u(body);
+        fprintf(stderr, "net: search got %zu channels (%zu bytes)%s%s\n", got.size(), body.size(),
+                error.empty() ? "" : ": ", error.c_str());
+        std::lock_guard<std::mutex> g(tv_lock);
+        tv_arrived.swap(got);
+        tv_has_arrived = true;
+    });
+}
+std::string search_query, radio_query; /* typed; last asked of radio-browser */
+double search_typed_at;
+
+void fetch_clear(Fetch &f)
+{
+    if (f.m) {
+        if (f.loading)
+            libvlc_media_parse_stop(f.m);
+        libvlc_media_release(f.m);
+        f.m = nullptr;
+    }
+    f.loading = false;
+    for (NetEntry &e : f.got)
+        if (e.media)
+            libvlc_media_release(e.media);
+    f.got.clear();
+}
+
+void fetch_start(Fetch &f, const std::string &url)
+{
+    fetch_clear(f);
+    libvlc_instance_t *vlc = player_vlc();
+    f.url = url;
+    f.m = vlc ? libvlc_media_new_location(vlc, url.c_str()) : nullptr;
+    if (f.m && libvlc_media_parse_with_options(f.m, libvlc_media_parse_network, 20000) == 0) {
+        f.loading = true;
+        fprintf(stderr, "net: search fetching %s\n", url.c_str());
+    }
+    search_serial++;
+}
+
+void fetch_poll(Fetch &f)
+{
+    if (!f.loading || libvlc_media_get_parsed_status(f.m) == 0)
+        return;
+    f.loading = false;
+    if (libvlc_media_list_t *subs = libvlc_media_subitems(f.m)) {
+        libvlc_media_list_lock(subs);
+        for (int i = 0; i < libvlc_media_list_count(subs); i++) {
+            libvlc_media_t *m = libvlc_media_list_item_at_index(subs, i);
+            if (!m)
+                continue;
+            char *mrl = libvlc_media_get_mrl(m), *title = libvlc_media_get_meta(m, libvlc_meta_Title);
+            if (mrl && libvlc_media_get_type(m) != libvlc_media_type_directory) {
+                NetEntry e;
+                e.url = mrl;
+                e.name = title ? title : e.url.substr(e.url.rfind('/') + 1);
+                e.dir = false;
+                e.media = m;
+                libvlc_media_retain(m);
+                f.got.push_back(e);
+            }
+            free(mrl);
+            free(title);
+            libvlc_media_release(m);
+        }
+        libvlc_media_list_unlock(subs);
+        libvlc_media_list_release(subs);
+    }
+    fprintf(stderr, "net: search got %zu from %s\n", f.got.size(), f.url.c_str());
+    search_serial++;
+}
+
+std::string url_encode(const std::string &s)
+{
+    std::string out;
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == '-' || c == '.' || c == '_') {
+            out += (char)c;
+        } else {
+            char h[4];
+            snprintf(h, sizeof(h), "%%%02X", c);
+            out += h;
+        }
+    }
+    return out;
+}
+
+void search_update()
+{
+    {
+        std::lock_guard<std::mutex> g(tv_lock);
+        if (tv_has_arrived) {
+            tv_has_arrived = false;
+            tv_list.swap(tv_arrived);
+            tv_loading = false;
+            if (tv_list.empty())
+                tv_started = false; /* failed: asked again the next time Search is used */
+            search_serial++;
+        }
+    }
+    if (!tv_loading && tv_thread.joinable())
+        tv_thread.join();
+    fetch_poll(radio_found);
+    /* radio-browser is asked once the typing pauses */
+    if (search_query.size() >= 2 && search_query != radio_query && plat_time() - search_typed_at > 0.6) {
+        radio_query = search_query;
+        fetch_start(radio_found, std::string(RADIO_LISTS) + "byname/" + url_encode(search_query) +
+                                     "?limit=40&order=clickcount&reverse=true&hidebroken=true");
+    }
+}
+
+
 } // namespace
 
 void net_init()
@@ -430,6 +624,10 @@ void net_shutdown()
         upnp_starter.join();
     net_list_stop();
     clear_entries();
+    if (tv_thread.joinable())
+        tv_thread.join();
+    tv_list.clear();
+    fetch_clear(radio_found);
     if (upnp) {
         libvlc_media_discoverer_stop(upnp);
         libvlc_media_discoverer_release(upnp);
@@ -455,6 +653,7 @@ void net_update()
         libvlc_dialog_dismiss(id);
     if (list_state == NET_LOADING && libvlc_media_get_parsed_status(listing) != 0)
         finish_listing();
+    search_update();
 }
 
 std::vector<NetServer> net_servers()
@@ -495,6 +694,56 @@ void net_forget_server(const std::string &url)
     saved.erase(std::remove_if(saved.begin(), saved.end(), [&](const Saved &s) { return s.url == url; }),
                 saved.end());
     store_saved();
+}
+
+
+void net_search_typed(const std::string &query)
+{
+    std::string q = query;
+    while (!q.empty() && q.back() == ' ')
+        q.pop_back();
+    while (!q.empty() && q[0] == ' ')
+        q.erase(0, 1);
+    tv_start_download(); /* once a session (again if it failed) */
+    if (q != search_query) {
+        search_query = q;
+        search_typed_at = plat_time();
+        if (q.size() < 2) {
+            fetch_clear(radio_found);
+            radio_query.clear();
+        }
+    }
+}
+
+bool net_search_busy()
+{
+    return tv_loading || radio_found.loading ||
+           (search_query.size() >= 2 && search_query != radio_query);
+}
+
+int net_search_serial()
+{
+    return search_serial;
+}
+
+const std::vector<NetEntry> &net_search_tv()
+{
+    return tv_list;
+}
+
+const std::vector<NetEntry> &net_search_radio()
+{
+    return radio_found.got;
+}
+
+libvlc_media_t *net_search_media(const std::string &url)
+{
+    for (NetEntry &e : radio_found.got)
+        if (e.url == url && e.media) {
+            libvlc_media_retain(e.media);
+            return e.media;
+        }
+    return nullptr;
 }
 
 bool net_is_saved_server(const std::string &url)

@@ -584,6 +584,22 @@ bool start()
 
 }  // namespace
 
+/* A plain HTTPS download (redirects followed), for other parts of the app. */
+bool web_https_get(const std::string &url, std::string &body, std::string &error)
+{
+    Reply r = https_get(url);
+    if (!r.error.empty()) {
+        error = r.error;
+        return false;
+    }
+    if (r.status != 200) {
+        error = "HTTP " + std::to_string(r.status);
+        return false;
+    }
+    body.swap(r.body);
+    return true;
+}
+
 bool osub_has_key()
 {
     return !pref_str("osub_key", "").empty();

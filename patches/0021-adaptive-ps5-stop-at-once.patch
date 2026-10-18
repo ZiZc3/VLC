@@ -1,0 +1,58 @@
+--- a/modules/demux/adaptive/http/HTTPConnection.cpp
++++ b/modules/demux/adaptive/http/HTTPConnection.cpp
+@@ -42,6 +42,19 @@
+ 
+ using namespace adaptive::http;
+ 
++/* VLC-PS5: the player stopped this video (src/player.cc). Without this,
++ * after a stop the next segment was still fetched, by VLC's own http once
++ * the console's refused it, and leaving a slow channel took 10 s; the next
++ * video waited for it (2026-10-18). */
++extern "C" int vlc_ps5_stream_cancelled(long) __attribute__((weak));
++static bool ps5_cancelled(vlc_object_t *obj)
++{
++    if (vlc_ps5_stream_cancelled == nullptr)
++        return false;
++    long serial = (long)var_InheritInteger(obj, "ps5http-serial");
++    return serial > 0 && vlc_ps5_stream_cancelled(serial);
++}
++
+ AbstractConnection::AbstractConnection(vlc_object_t *p_object_)
+ {
+     p_object = p_object_;
+@@ -295,7 +308,7 @@
+ RequestStatus LibVLCHTTPConnection::request(const std::string &path,
+                                             const BytesRange &range)
+ {
+-    if(source->http_mgr == nullptr)
++    if(source->http_mgr == nullptr || ps5_cancelled(p_object))
+         return RequestStatus::GenericError;
+ 
+     reset();
+@@ -414,6 +427,8 @@
+ 
+ ssize_t LibVLCHTTPConnection::read(void *p_buffer, size_t len)
+ {
++    if (ps5_cancelled(p_object))
++        return 0;
+     ssize_t read = vlc_stream_Read(stream, p_buffer, len);
+     bytesRead = source->totalRead;
+     return read;
+@@ -462,6 +477,8 @@
+ RequestStatus StreamUrlConnection::request(const std::string &path,
+                                            const BytesRange &range)
+ {
++    if (ps5_cancelled(p_object))
++        return RequestStatus::GenericError;
+     reset();
+ 
+     /* Set new path for this query */
+@@ -509,6 +526,8 @@
+ {
+     if( !p_streamurl )
+         return VLC_EGENERIC;
++    if (ps5_cancelled(p_object))
++        return 0;
+ 
+     if(len == 0)
+         return VLC_SUCCESS;

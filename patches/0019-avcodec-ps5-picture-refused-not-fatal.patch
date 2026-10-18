@@ -1,0 +1,41 @@
+--- a/modules/codec/avcodec/video.c
++++ b/modules/codec/avcodec/video.c
+@@ -84,6 +84,9 @@
+     /* Hack to force display of still pictures */
+     bool b_first_frame;
+ 
++    /* VLC-PS5: pictures refused in a row (see DecodeBlock) */
++    int ps5_refused;
++
+     bool b_draining;
+ 
+     /* */
+@@ -1244,6 +1247,19 @@
+             }
+ 
+             ret = avcodec_send_packet(p_context, pkt);
++            if( ret == AVERROR(ENOMEM) && p_sys->ps5_refused < 200 )
++            {
++                /* VLC-PS5: no picture for a moment (the pictures are cancelled
++                 * at a live stream's break, while the decoder's threads still
++                 * ask for one): that packet is lost, and the video goes on
++                 * from the next keyframe instead of ending (BBC America's
++                 * picture stopped for good at a segment break, 2026-10-13) */
++                if (p_sys->ps5_refused++ == 0)
++                    msg_Warn(p_dec, "avcodec_send_packet: no picture for now, going on from the next keyframe");
++                avcodec_flush_buffers(p_context);
++                av_packet_free( &pkt );
++                break;
++            }
+             if( ret != 0 && ret != AVERROR(EAGAIN) )
+             {
+                 if (ret == AVERROR(ENOMEM) || ret == AVERROR(EINVAL))
+@@ -1283,6 +1299,8 @@
+             break;
+         }
+         bool not_received_frame = ret;
++        if (!not_received_frame)
++            p_sys->ps5_refused = 0;
+ 
+         wait_mt( p_sys );
+ 
