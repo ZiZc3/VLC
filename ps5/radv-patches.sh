@@ -7,7 +7,9 @@
 #   bash ps5/radv-patches.sh
 #
 # patches/mesa/0001: HDR10 output (the framebuffers switched in place, the
-# output's dynamic range read back) for src/player.cc.
+# output's dynamic range read back) for src/player.cc, and the output's
+# refresh for films (23.976 / 24 / 50 Hz) for src/main.cc. One patch per file:
+# each run starts the file again from the fork's original.
 set -euo pipefail
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(dirname "$here")

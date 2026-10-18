@@ -226,7 +226,7 @@ int vlc_ps5_big_free(void *addr)
     for (int i = 0; i < BIG_MAX && !found; i++) {
         if (big_maps[i].addr && big_maps[i].addr == addr) {
             if (big_maps[i].start < 0) {
-                sceKernelReleaseFlexibleMemory(addr, big_maps[i].len);
+                sceKernelMunmap(addr, big_maps[i].len);   /* (released, it never came back) */
                 big_maps[i].addr = NULL;
                 found = 1;
                 break;
@@ -339,7 +339,7 @@ void *__wrap_mmap(void *addr, size_t len, int prot, int flags, int fd,
         return MAP_FAILED;
     }
     if ((flags & MAP_FIXED) && result != addr) {
-        sceKernelReleaseFlexibleMemory(result, len);
+        sceKernelMunmap(result, len);
         errno = EINVAL;
         return MAP_FAILED;
     }
@@ -352,7 +352,11 @@ int __wrap_munmap(void *addr, size_t len)
     if (unmap_direct(addr, len)) {
         return 0;
     }
-    if (sceKernelReleaseFlexibleMemory(addr, len) == 0) {
+    /* Flexible memory comes back with munmap, not with
+     * sceKernelReleaseFlexibleMemory: released, it stayed taken (the app's
+     * self-test on the console, 2026-10-13: 32 MiB released, 0 back; 32 MiB
+     * unmapped, all back). Every big free VLC and FFmpeg made leaked so. */
+    if (sceKernelMunmap(addr, len) == 0) {
         return 0;
     }
     /* A reserved range, or a file mapping. */
