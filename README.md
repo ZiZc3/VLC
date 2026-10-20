@@ -217,9 +217,9 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 - **[VLC](https://www.videolan.org/)** by VideoLAN and its contributors, and **[FFmpeg](https://ffmpeg.org/)**.
 - **[Mihawk-99](https://github.com/mihawk-99)**: [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan), RADV on the PS5.
 - **[ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk)**, **[kstuff](https://github.com/EchoStretch/kstuff)**, **[etaHEN](https://github.com/LightningMods/etaHEN)**, **[ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)** and the PS5 scene.
-- **[AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (MIT licence, `third_party/fsr1`): the FSR 1 upscaler.
-- **[FSRCNNX](https://github.com/igv/FSRCNN-TensorFlow)** by igv (LGPL-3.0, `third_party/mpv-shaders/fsrcnnx`): the FSRCNNX upscaler, run from its mpv shader file.
-- **[Anime4K](https://github.com/bloc97/Anime4K)** by bloc97 (MIT licence, `third_party/mpv-shaders/anime4k`): the Anime4K upscaler, run from its mpv shader files.
+- **[AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (MIT licence): the FSR 1 upscaler.
+- **[FSRCNNX](https://github.com/igv/FSRCNN-TensorFlow)** by igv (LGPL-3.0): the FSRCNNX upscaler, run from its mpv shader file.
+- **[Anime4K](https://github.com/bloc97/Anime4K)** by bloc97 (MIT licence): the Anime4K upscaler, run from its mpv shader files.
 - The idea of using these mpv shaders together comes from [mpv-anime-build](https://github.com/Chinna95P/mpv-anime-build) by Chinna95P.
 - **[Dear ImGui](https://github.com/ocornut/imgui)**, [volk](https://github.com/zeux/volk), [stb](https://github.com/nothings/stb), GnuTLS, libsmb2, libupnp, libxml2, libass, FreeType, FriBidi, HarfBuzz, libdvdnav, libbluray and libarchive.
 - Fonts: **[Inter](https://rsms.me/inter/)**, **Selawik**, **DejaVu Sans Mono** and **Noto**.
