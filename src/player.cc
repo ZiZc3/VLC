@@ -43,11 +43,18 @@
 #include <vlc_url.h>
 #include <vlc_stream.h>
 
+#include "gen/fsr_easu_frag.h"
+#include "gen/fsr_rcas_frag.h"
+#include "gen/fullscreen_vert.h"
+#include "gen/mpv_luma_frag.h"
+#include "gen/mpv_merge_frag.h"
+#include "gen/upscale_frag.h"
 #include "gen/video_frag.h"
 #include "gen/video_vert.h"
 #include "gfx.h"
 #include "image.h"
 #include "lang.h"
+#include "mpvshader.h"
 #include "platform.h"
 #include "prefs.h"
 #include "subconv.h"
@@ -254,6 +261,7 @@ struct Planes {
     Colour colour;
     uint32_t buf_w, buf_h;
     uint32_t vis_w, vis_h;
+    uint64_t upload_frame;   /* the frame the last picture came in */
 } planes;
 
 VkSampler sampler;
@@ -263,6 +271,71 @@ VkDescriptorSet desc_set;
 VkPipelineLayout pipe_layout;
 VkPipeline pipeline;
 VkPipeline pipeline_hdr;   /* in gfx.hdr_pass (HDR10 output) */
+
+/* Upscaling (PLAN-UPSCALING.txt). Bilinear draws as before, straight from the
+ * planes. The others: pass 1 draws the picture upright at its own size into
+ * an image (video.frag, every colour step done, the output's signal), then
+ * upscale.frag enlarges it into the rectangle, turned and flipped. */
+VkRenderPass src_pass;
+VkPipeline pipeline_src;          /* video.frag into the image */
+VkDescriptorSetLayout up_set_layout;
+VkDescriptorPool up_pool;
+VkDescriptorSet up_set;
+VkPipelineLayout up_layout;
+VkPipeline pipeline_up, pipeline_up_hdr;
+/* AMD FSR 1: EASU from the picture into an image at the rectangle's size
+ * (upright), then RCAS sharpens it onto the screen, turned and flipped */
+VkPipeline pipeline_easu, pipeline_rcas, pipeline_rcas_hdr;
+VkDescriptorSet mid_set;
+struct SrcImage {
+    VkImage image;
+    VkDeviceMemory memory;
+    VkImageView view;
+    VkFramebuffer fb;
+    uint32_t w, h;
+    uint64_t drawn_frame;         /* the frame pass 1 drew it in */
+} srcimg, midimg;  /* midimg: FSR's upscaled image, at the rectangle's size */
+unsigned image_generation;   /* +1 each time an upscaling image is made again */
+/* mpv's shaders (src/mpvshader.cc). FSRCNNX enlarges the brightness:
+ * mpv_luma.frag takes it from the picture into lumaimg, FSRCNNX doubles it,
+ * mpv_merge.frag brings it to the rectangle with the picture's colour.
+ * Anime4K doubles the whole picture, then upscale.frag (EWA) does the rest. */
+VkPipeline pipeline_luma;
+VkDescriptorSetLayout merge_set_layout;
+VkPipelineLayout merge_layout;
+VkDescriptorPool merge_pool;
+VkDescriptorSet merge_set, mpv_set, luma_set;
+VkPipeline pipeline_merge, pipeline_merge_hdr;
+SrcImage lumaimg;
+MpvImage mpv_out;          /* the set's result this frame */
+uint64_t mpv_drawn_frame;
+unsigned merge_written[2], mpv_set_written[2];   /* what the sets read: image_generation, mpv_plan_id() + 1 */
+struct UpPush {
+    float size[4];    /* the picture read: width, height, 1/width, 1/height */
+    float xform[4];   /* quarter turns, mirror, upside down, filter (FSR: sharpness) */
+    float outp[4];    /* the image written: width, height (FSR's first pass) */
+};
+/* Upscaling's GPU time, in the log every 5 s while it works: a timestamp
+ * before its first pass and after the picture is on screen, per frame in
+ * flight, read back when that frame comes round again. */
+VkQueryPool time_pool;
+double time_period_ns;       /* one tick */
+bool time_started[GFX_FRAMES], time_done[GFX_FRAMES], time_full[GFX_FRAMES];
+double time_sum_ms, time_max_ms, time_next_log, time_rep_ms;
+int time_count, time_rep_count;
+/* Anime4K's weight for this video: 0 heavy (VL), 1 medium (M + VL), 2
+ * light (M). Heavy first; a video it can't keep up with (a new picture
+ * takes longer than 3/4 of the time between pictures: 1080p at 60 fps)
+ * goes one lighter, and stays there. */
+int a4k_tier;
+int a4k_gen = -1;
+double a4k_sum_ms;
+int a4k_count;
+
+/* FSR's sharpness, in stops below the strongest: the strongest (AMD's
+ * default 0.2 made a 1080p film on a 4K TV look all but unchanged, the
+ * user, 2026-10-20) */
+const float FSR_SHARPNESS = 0.0f;
 
 struct Push {
     float row0[4], row1[4], row2[4];
@@ -275,6 +348,17 @@ struct Push {
     float hdr[4];      /* transfer (Transfer), peak (nits), BT.2020 primaries (1), NV12/P010 (1) */
     float outp[4];     /* HDR10 output (1): PQ, BT.2020 into gfx.hdr_pass's 10-bit frame */
 };
+
+/* The last frame's upscaling (prep_key): with the same picture, settings
+ * and size, its images are still right and only the last pass runs (a
+ * 24 fps film on a 60 Hz screen: the heavy passes 24 times a second). */
+struct PrepKey {
+    Push p;
+    int mode, tier;
+    float uw, uh;
+    unsigned gen;
+} prep_key;
+uint64_t prep_upload = ~0ull;
 
 /* where a 360° video is looked at */
 float view_yaw, view_pitch, view_fov = 90;
@@ -1027,6 +1111,179 @@ bool create_pipeline()
         gp.renderPass = gfx.hdr_pass;
         if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_hdr) != VK_SUCCESS)
             pipeline_hdr = VK_NULL_HANDLE;
+    }
+
+    /* Upscaling: pass 1's render pass (a 16-bit float image, read after) */
+    if (r == VK_SUCCESS) {
+        VkAttachmentDescription ad = {};
+        ad.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+        ad.samples = VK_SAMPLE_COUNT_1_BIT;
+        ad.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        ad.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ad.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        ad.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        ad.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ad.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference ref = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub = {};
+        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments = &ref;
+        VkSubpassDependency dep[2] = {};
+        dep[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep[0].dstSubpass = 0;
+        dep[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dep[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep[1].srcSubpass = 0;
+        dep[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rp = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rp.attachmentCount = 1;
+        rp.pAttachments = &ad;
+        rp.subpassCount = 1;
+        rp.pSubpasses = &sub;
+        rp.dependencyCount = 2;
+        rp.pDependencies = dep;
+        if (vkCreateRenderPass(gfx.device, &rp, nullptr, &src_pass) == VK_SUCCESS) {
+            gp.renderPass = src_pass;
+            if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_src) != VK_SUCCESS)
+                pipeline_src = VK_NULL_HANDLE;
+        }
+        /* upscale.frag: the image in, the rectangle out */
+        VkDescriptorSetLayoutBinding ub = {};
+        ub.binding = 0;
+        ub.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ub.descriptorCount = 1;
+        ub.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo uli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        uli.bindingCount = 1;
+        uli.pBindings = &ub;
+        VkDescriptorPoolSize ups = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 };
+        VkDescriptorPoolCreateInfo upi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        upi.maxSets = 4;
+        upi.poolSizeCount = 1;
+        upi.pPoolSizes = &ups;
+        VkPushConstantRange urange = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UpPush) };
+        VkPipelineLayoutCreateInfo upl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        upl.setLayoutCount = 1;
+        upl.pSetLayouts = &up_set_layout;
+        upl.pushConstantRangeCount = 1;
+        upl.pPushConstantRanges = &urange;
+        bool ok = pipeline_src &&
+                  vkCreateDescriptorSetLayout(gfx.device, &uli, nullptr, &up_set_layout) == VK_SUCCESS &&
+                  vkCreateDescriptorPool(gfx.device, &upi, nullptr, &up_pool) == VK_SUCCESS &&
+                  vkCreatePipelineLayout(gfx.device, &upl, nullptr, &up_layout) == VK_SUCCESS;
+        if (ok) {
+            VkDescriptorSetAllocateInfo uai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            uai.descriptorPool = up_pool;
+            uai.descriptorSetCount = 1;
+            uai.pSetLayouts = &up_set_layout;
+            ok = vkAllocateDescriptorSets(gfx.device, &uai, &up_set) == VK_SUCCESS &&
+                 vkAllocateDescriptorSets(gfx.device, &uai, &mid_set) == VK_SUCCESS &&
+                 vkAllocateDescriptorSets(gfx.device, &uai, &luma_set) == VK_SUCCESS &&
+                 vkAllocateDescriptorSets(gfx.device, &uai, &mpv_set) == VK_SUCCESS;
+        }
+        if (ok) {
+            VkShaderModule uvs = gfx_shader(spv_fullscreen_vert, sizeof(spv_fullscreen_vert));
+            VkShaderModule ufs = gfx_shader(spv_upscale_frag, sizeof(spv_upscale_frag));
+            stages[0].module = uvs;
+            stages[1].module = ufs;
+            gp.layout = up_layout;
+            gp.renderPass = gfx.render_pass;
+            if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_up) != VK_SUCCESS)
+                pipeline_up = VK_NULL_HANDLE;
+            if (pipeline_up && gfx.hdr_pass) {
+                gp.renderPass = gfx.hdr_pass;
+                if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_up_hdr) !=
+                    VK_SUCCESS)
+                    pipeline_up_hdr = VK_NULL_HANDLE;
+            }
+            /* FSR 1: EASU into the middle image (pass 1's render pass:
+             * the same kind of image), RCAS onto the screen */
+            VkShaderModule efs = gfx_shader(spv_fsr_easu_frag, sizeof(spv_fsr_easu_frag));
+            VkShaderModule rfs = gfx_shader(spv_fsr_rcas_frag, sizeof(spv_fsr_rcas_frag));
+            stages[1].module = efs;
+            gp.renderPass = src_pass;
+            if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_easu) != VK_SUCCESS)
+                pipeline_easu = VK_NULL_HANDLE;
+            stages[1].module = rfs;
+            gp.renderPass = gfx.render_pass;
+            if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_rcas) != VK_SUCCESS)
+                pipeline_rcas = VK_NULL_HANDLE;
+            if (pipeline_rcas && gfx.hdr_pass) {
+                gp.renderPass = gfx.hdr_pass;
+                if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_rcas_hdr) !=
+                    VK_SUCCESS)
+                    pipeline_rcas_hdr = VK_NULL_HANDLE;
+            }
+            /* mpv's shaders: the brightness pass into an image, the merge
+             * (two textures) onto the screen */
+            VkShaderModule lfs = gfx_shader(spv_mpv_luma_frag, sizeof(spv_mpv_luma_frag));
+            VkShaderModule mfs = gfx_shader(spv_mpv_merge_frag, sizeof(spv_mpv_merge_frag));
+            stages[1].module = lfs;
+            gp.renderPass = src_pass;
+            if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_luma) != VK_SUCCESS)
+                pipeline_luma = VK_NULL_HANDLE;
+            VkDescriptorSetLayoutBinding mb[2] = { ub, ub };
+            mb[1].binding = 1;
+            VkDescriptorSetLayoutCreateInfo mli = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+            mli.bindingCount = 2;
+            mli.pBindings = mb;
+            VkDescriptorPoolSize mps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
+            VkDescriptorPoolCreateInfo mpi = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+            mpi.maxSets = 1;
+            mpi.poolSizeCount = 1;
+            mpi.pPoolSizes = &mps;
+            VkPipelineLayoutCreateInfo mpl = upl;
+            mpl.pSetLayouts = &merge_set_layout;
+            if (vkCreateDescriptorSetLayout(gfx.device, &mli, nullptr, &merge_set_layout) == VK_SUCCESS &&
+                vkCreateDescriptorPool(gfx.device, &mpi, nullptr, &merge_pool) == VK_SUCCESS &&
+                vkCreatePipelineLayout(gfx.device, &mpl, nullptr, &merge_layout) == VK_SUCCESS) {
+                VkDescriptorSetAllocateInfo mai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+                mai.descriptorPool = merge_pool;
+                mai.descriptorSetCount = 1;
+                mai.pSetLayouts = &merge_set_layout;
+                if (vkAllocateDescriptorSets(gfx.device, &mai, &merge_set) == VK_SUCCESS) {
+                    stages[1].module = mfs;
+                    gp.layout = merge_layout;
+                    gp.renderPass = gfx.render_pass;
+                    if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_merge) !=
+                        VK_SUCCESS)
+                        pipeline_merge = VK_NULL_HANDLE;
+                    if (pipeline_merge && gfx.hdr_pass) {
+                        gp.renderPass = gfx.hdr_pass;
+                        if (vkCreateGraphicsPipelines(gfx.device, VK_NULL_HANDLE, 1, &gp, nullptr,
+                                                      &pipeline_merge_hdr) != VK_SUCCESS)
+                            pipeline_merge_hdr = VK_NULL_HANDLE;
+                    }
+                }
+            }
+            gp.layout = up_layout;
+            if (!mpv_init(src_pass, sampler))
+                fprintf(stderr, "player: mpv shaders not available\n");
+            vkDestroyShaderModule(gfx.device, lfs, nullptr);
+            vkDestroyShaderModule(gfx.device, mfs, nullptr);
+            vkDestroyShaderModule(gfx.device, efs, nullptr);
+            vkDestroyShaderModule(gfx.device, rfs, nullptr);
+            vkDestroyShaderModule(gfx.device, uvs, nullptr);
+            vkDestroyShaderModule(gfx.device, ufs, nullptr);
+        }
+        VkQueryPoolCreateInfo qi = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qi.queryCount = 2 * GFX_FRAMES;
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(gfx.gpu, &props);
+        time_period_ns = props.limits.timestampPeriod;
+        if (time_period_ns <= 0 || vkCreateQueryPool(gfx.device, &qi, nullptr, &time_pool) != VK_SUCCESS)
+            time_pool = VK_NULL_HANDLE;
+        fprintf(stderr, "player: upscaling %s, FSR 1 %s, FSRCNNX %s\n", pipeline_up ? "ready" : "not available",
+                pipeline_easu && pipeline_rcas ? "ready" : "not available",
+                pipeline_luma && pipeline_merge ? "ready" : "not available");
     }
     vkDestroyShaderModule(gfx.device, vs, nullptr);
     vkDestroyShaderModule(gfx.device, fs, nullptr);
@@ -1956,6 +2213,40 @@ void side_subs_apply()
 
 static bool start_queued();
 
+/* A choice on the player object (libvlc's media player is a VLC object): the
+ * next input inherits it, whatever its media carries from before. */
+static vlc_object_t *player_object()
+{
+    return (vlc_object_t *)mp;
+}
+
+static void player_choice_bool(const char *name, bool on)
+{
+    if (!mp)
+        return;
+    if (!var_Type(player_object(), name))
+        var_Create(player_object(), name, VLC_VAR_BOOL);
+    var_SetBool(player_object(), name, on);
+}
+
+static void player_choice_int(const char *name, int64_t v)
+{
+    if (!mp)
+        return;
+    if (!var_Type(player_object(), name))
+        var_Create(player_object(), name, VLC_VAR_INTEGER);
+    var_SetInteger(player_object(), name, v);
+}
+
+static void player_choice_float(const char *name, float v)
+{
+    if (!mp)
+        return;
+    if (!var_Type(player_object(), name))
+        var_Create(player_object(), name, VLC_VAR_FLOAT);
+    var_SetFloat(player_object(), name, v);
+}
+
 bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start_ms,
                        const std::vector<std::string> &options)
 {
@@ -2022,11 +2313,15 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
             restore_audio = -3; /* "nothing to pick" but the subtitles still are */
         restore_delays = kept.audio_delay || kept.spu_delay;
     }
-    if (start_ms > 0) {
-        char opt[64];
-        snprintf(opt, sizeof(opt), ":start-time=%.3f", start_ms / 1000.0);
-        libvlc_media_add_option(m, opt);
-    }
+    /* The start point, hardware and fast decoding: set on the player, which
+     * the input takes them from, not added to the media. A share's or a
+     * channel list's media is the listing's own, opened again and again;
+     * VLC keeps every option added to it and won't add one it already has,
+     * so after On, Off, On the "no hardware decoding" stayed the last one and
+     * the file played in software until the folder was listed again (issue
+     * #11, 2026-10-19). A resume point or fast decoding would have stuck the
+     * same way. */
+    player_choice_float("start-time", start_ms > 0 ? start_ms / 1000.0f : 0.0f);
     /* Seeks land on the keyframe before the target instead of decoding every
      * picture from it to the exact time unseen: with seconds between keyframes
      * (PS5 recordings, streaming encodes) at 60 fps, that hidden work froze the
@@ -2043,13 +2338,10 @@ bool player_open_media(libvlc_media_t *m, const std::string &path, int64_t start
     chapters_tried = 0;
     chapters_title = -2;
     fast_now = decode_mode == DECODE_FAST || (decode_mode == DECODE_AUTO && path == fast_path);
-    if (fast_now) {
-        libvlc_media_add_option(m, ":avcodec-skiploopfilter=4");
-        libvlc_media_add_option(m, ":avcodec-fast");
-    }
+    player_choice_int("avcodec-skiploopfilter", fast_now ? 4 : 0);
+    player_choice_bool("avcodec-fast", fast_now);
     bool software = path == software_path || !player_hw_decoding();
-    if (software)
-        libvlc_media_add_option(m, ":no-ps5vdec");
+    player_choice_bool("ps5vdec", !software);
     live_paused = false;
     pause_wanted = -1;
     info = VideoInfo{};
@@ -2528,13 +2820,14 @@ void player_toggle_pause()
         /* back to the live point: queued like an open, so a stop still
          * stuck on the network doesn't freeze the app */
         live_paused = false;
-        if (last_media) {
-            libvlc_media_retain(last_media);
-            if (queued_media)
-                libvlc_media_release(queued_media);
-            queued_media = last_media;
-            if (!stopping)
-                start_queued();
+        /* Opened fresh, with today's settings: the kept media still carried
+         * the open's ":no-ps5vdec", and a channel paused with hardware
+         * decoding off stayed in software after it was turned back on
+         * (issue #11, 2026-10-18). Same address and options (player_open
+         * reuses them for the same path). */
+        if (!current_path.empty()) {
+            std::string path = current_path;
+            player_open(path, 0);
         }
         return;
     }
@@ -2832,6 +3125,7 @@ void video_upload(VkCommandBuffer cmd)
             shown = -1;
         last_slot = slot;
     }
+    planes.upload_frame = gfx.frame_number;
     uint32_t bpp = f.ten_bit ? 2 : 1;
     for (int i = 0; i < (f.two_planes ? 2 : PLANES); i++) {
         uint32_t texel = bpp * (f.two_planes && i == 1 ? 2 : 1);
@@ -2909,29 +3203,12 @@ void video_forget_picture()
     shown = -1;
 }
 
-void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
+/* video.frag's settings for the picture now (w, h: where it's drawn, for a
+ * 360° video's aspect) */
+static void fill_push(Push &p, float w, float h)
 {
-    if (!planes.has_picture)
-        return;
-    /* A new shape's first frame: the rectangle was worked out before the
-     * picture came, from the video before's shape. With the console's
-     * decoder the size and the first picture come in the same frame, and a
-     * portrait video flashed stretched over the whole screen after a 16:9
-     * one ("a frame from another video", caught by the log 2026-10-18).
-     * Nothing this one frame; the next is placed right. */
-    if (planes.new_shape_frame == gfx.frame_number) {
-        DIAG("diag draw: frame %llu skipped, the rectangle is the shape before's\n",
-                (unsigned long long)gfx.frame_number);
-        return;
-    }
-    if (diag_draws < 6) {
-        diag_draws++;
-        DIAG("diag draw: frame %llu, textures of setup %d (now %d), %ux%u at %.0f,%.0f %.0fx%.0f\n",
-                (unsigned long long)gfx.frame_number, planes.generation, generation, planes.buf_w,
-                planes.buf_h, x, y, w, h);
-    }
     const VideoInfo &v = player_video_info();
-    Push p = {};
+    p = Push{};
     /* The matrix VLC names; if it doesn't, BT.709 for HD and BT.601 for SD. */
     uint32_t vis_h = v.height ? v.height : planes.buf_h;
     YuvMatrix m = yuv_matrix(planes.colour.matrix, vis_h);
@@ -2953,7 +3230,7 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
     p.xform[0] = (float)picture.rotate;
     p.xform[1] = picture.mirror ? 1.0f : 0.0f;
     p.xform[2] = picture.upside_down ? 1.0f : 0.0f;
-    p.xform[3] = picture.sharpen / 25.0f; /* up to 4x the edges */
+    p.xform[3] = 0; /* (the old Sharpen: the upscalers sharpen now) */
     if (v.spherical) {
         p.params[3] = 1;
         p.view[0] = view_yaw * 3.14159265f / 180;
@@ -2966,12 +3243,428 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
      * instead of VLC scaling every picture to fill it on the CPU. */
     p.uv_scale[0] = planes.buf_w ? (float)planes.vis_w / planes.buf_w : 1.0f;
     p.uv_scale[1] = planes.buf_h ? (float)planes.vis_h / planes.buf_h : 1.0f;
+}
+
+/* the ones offered, in the menu's order */
+static const int upscalers_offered[] = { UPSCALE_BILINEAR, UPSCALE_EWA, UPSCALE_FSR, UPSCALE_FSRCNNX,
+                                         UPSCALE_ANIME4K };
+
+static bool upscaler_offered(int mode)
+{
+    for (int m : upscalers_offered)
+        if (m == mode)
+            return true;
+    return false;
+}
+
+int player_upscaler()
+{
+    /* Off (the GPU's bilinear, as always) unless another one was picked:
+     * off by default (the user, 2026-10-20); ones saved before and no longer
+     * offered count as Off */
+    int u = pref_int("upscale", UPSCALE_BILINEAR);
+    return upscaler_offered(u) ? u : UPSCALE_BILINEAR;
+}
+
+void player_set_upscaler(int mode)
+{
+    pref_set("upscale", upscaler_offered(mode) ? mode : UPSCALE_BILINEAR);
+}
+
+int player_upscaler_step(int mode, int dir)
+{
+    const int n = (int)(sizeof(upscalers_offered) / sizeof(*upscalers_offered));
+    int at = 0;
+    for (int i = 0; i < n; i++)
+        if (upscalers_offered[i] == mode)
+            at = i;
+    return upscalers_offered[(at + (dir < 0 ? -1 : 1) + n) % n];
+}
+
+const char *player_upscaler_name(int mode)
+{
+    static const char *const names[UPSCALE_COUNT] = { "Off", "Bicubic", "Lanczos-3", "AMD FSR",
+                                                      "EWA Lanczos Sharp", "FSRCNNX", "Anime4K" };
+    return mode >= 0 && mode < UPSCALE_COUNT ? names[mode] : names[0];
+}
+
+/* An upscaling image (16-bit float, drawn into, then read) at this size,
+ * made again when the size changes; set: the descriptor that reads it. */
+static bool ensure_image(SrcImage &img, uint32_t w, uint32_t h, VkDescriptorSet set, const char *what)
+{
+    if (img.image && img.w == w && img.h == h)
+        return true;
+    if (img.image)
+        vkDeviceWaitIdle(gfx.device); /* the old one may still be read */
+    image_generation++;
+    if (img.fb)
+        vkDestroyFramebuffer(gfx.device, img.fb, nullptr);
+    if (img.view)
+        vkDestroyImageView(gfx.device, img.view, nullptr);
+    if (img.image)
+        vkDestroyImage(gfx.device, img.image, nullptr);
+    if (img.memory)
+        vkFreeMemory(gfx.device, img.memory, nullptr);
+    img = SrcImage{};
+    if (!gfx_image(w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &img.image,
+                   &img.memory, &img.view))
+        return false;
+    VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fi.renderPass = src_pass;
+    fi.attachmentCount = 1;
+    fi.pAttachments = &img.view;
+    fi.width = w;
+    fi.height = h;
+    fi.layers = 1;
+    if (vkCreateFramebuffer(gfx.device, &fi, nullptr, &img.fb) != VK_SUCCESS)
+        return false;
+    img.w = w;
+    img.h = h;
+    VkDescriptorImageInfo ii = { sampler, img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wr.dstSet = set;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &ii;
+    vkUpdateDescriptorSets(gfx.device, 1, &wr, 0, nullptr);
+    fprintf(stderr, "player: upscaling %s %ux%u\n", what, w, h);
+    return true;
+}
+
+/* one full-image draw into an upscaling image */
+static void draw_into(VkCommandBuffer cmd, const SrcImage &img)
+{
+    VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = src_pass;
+    bi.framebuffer = img.fb;
+    bi.renderArea = { { 0, 0 }, { img.w, img.h } };
+    vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport vp = { 0, 0, (float)img.w, (float)img.h, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { img.w, img.h } };
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+}
+
+void video_prepare(VkCommandBuffer cmd, float rect_w, float rect_h)
+{
+    int mode = player_upscaler();
+    int slot = (int)gfx.frame_slot;
+    if (time_pool && slot < GFX_FRAMES) {
+        if (time_done[slot]) {
+            uint64_t t[2];
+            if (vkGetQueryPoolResults(gfx.device, time_pool, slot * 2, 2, sizeof(t), t, sizeof(uint64_t),
+                                      VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] >= t[0]) {
+                double ms = (t[1] - t[0]) * time_period_ns / 1e6;
+                if (time_full[slot]) {
+                    time_sum_ms += ms;
+                    time_max_ms = std::max(time_max_ms, ms);
+                    time_count++;
+                    if (mode == UPSCALE_ANIME4K) {
+                        a4k_sum_ms += ms;
+                        a4k_count++;
+                    }
+                } else {
+                    time_rep_ms += ms;
+                    time_rep_count++;
+                }
+            }
+        }
+        time_started[slot] = time_done[slot] = false;
+        double now = plat_time();
+        static int time_mode = -1;
+        if (mode != time_mode) { /* numbers so far were another upscaler's */
+            time_sum_ms = time_max_ms = time_rep_ms = 0;
+            time_count = time_rep_count = 0;
+            time_mode = mode;
+            time_next_log = now + 5;
+        }
+        if (time_count && now >= time_next_log) {
+            fprintf(stderr, "player: upscaling (%s) %ux%u: GPU %.2f ms a new picture (slowest %.2f), %.2f ms a repeat\n",
+                    player_upscaler_name(mode), planes.vis_w, planes.vis_h, time_sum_ms / time_count, time_max_ms,
+                    time_rep_count ? time_rep_ms / time_rep_count : 0.0);
+            time_sum_ms = time_max_ms = time_rep_ms = 0;
+            time_count = time_rep_count = 0;
+            time_next_log = now + 5;
+        }
+        if (mode != UPSCALE_BILINEAR && planes.has_picture) {
+            vkCmdResetQueryPool(cmd, time_pool, slot * 2, 2);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, time_pool, slot * 2);
+            time_started[slot] = true;
+            time_full[slot] = false; /* until the passes run below */
+        }
+    }
+    if (mode == UPSCALE_BILINEAR || !planes.has_picture || !pipeline_src || !pipeline_up ||
+        (gfx.hdr && pipeline_hdr && !pipeline_up_hdr) || rect_w < 1 || rect_h < 1)
+        return;
+    if (player_video_info().spherical)
+        return; /* a projection: drawn straight, as before */
+    uint32_t w = planes.vis_w, h = planes.vis_h;
+    if (!w || !h)
+        return;
+    /* the rectangle upright (turned a quarter, its sides swap): only when
+     * it's bigger than the picture (4K on a 4K screen: nothing to enlarge) */
+    bool turned = picture.rotate & 1;
+    float uw = turned ? rect_h : rect_w, uh = turned ? rect_w : rect_h;
+    if (uw <= w + 0.5f && uh <= h + 0.5f)
+        return;
+    if (!ensure_image(srcimg, w, h, up_set, "from"))
+        return;
+    Push p;
+    fill_push(p, (float)w, (float)h);
+    p.xform[0] = p.xform[1] = p.xform[2] = 0; /* upright: the last pass turns it */
+    p.outp[1] = 1; /* colour enlarged by Spline36 */
+
+    /* Anime4K's weight: a new video starts heavy (light above 1080p) */
+    if (mode == UPSCALE_ANIME4K) {
+        if (a4k_gen != planes.generation) {
+            a4k_gen = planes.generation;
+            a4k_tier = w <= 1920 && h <= 1088 ? 0 : 2;
+            a4k_sum_ms = 0;
+            a4k_count = 0;
+        }
+        float fps = player_video_info().fps > 1 ? player_video_info().fps : 30.0f;
+        if (a4k_count >= 12) {
+            double avg = a4k_sum_ms / a4k_count, budget = 0.75 * 1000.0 / fps;
+            if (avg > budget && a4k_tier < 2) {
+                a4k_tier++;
+                fprintf(stderr, "player: Anime4K can't keep up with this video (%.1f ms a picture, %.1f fps): %s\n",
+                        avg, fps, a4k_tier == 1 ? "medium" : "light");
+            }
+            a4k_sum_ms = 0;
+            a4k_count = 0;
+        }
+    }
+    PrepKey key;
+    memset(&key, 0, sizeof(key));
+    key.p = p;
+    key.mode = mode;
+    key.tier = mode == UPSCALE_ANIME4K ? a4k_tier : 0;
+    key.uw = uw;
+    key.uh = uh;
+    key.gen = image_generation;
+    if (prep_upload == planes.upload_frame && !memcmp(&key, &prep_key, sizeof(key)) &&
+        srcimg.drawn_frame + 1 >= gfx.frame_number) {
+        /* the images from the last frame are still right */
+        srcimg.drawn_frame = gfx.frame_number;
+        if (mode == UPSCALE_FSR && midimg.drawn_frame + 1 >= gfx.frame_number)
+            midimg.drawn_frame = gfx.frame_number;
+        if ((mode == UPSCALE_FSRCNNX || mode == UPSCALE_ANIME4K) && mpv_drawn_frame + 1 >= gfx.frame_number)
+            mpv_drawn_frame = gfx.frame_number;
+        return;
+    }
+    if (slot < GFX_FRAMES)
+        time_full[slot] = true;
+    draw_into(cmd, srcimg);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_src);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout, 0, 1, &desc_set, 0, nullptr);
+    vkCmdPushConstants(cmd, pipe_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(p), &p);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+    srcimg.drawn_frame = gfx.frame_number;
+
+    /* FSR 1's first pass: up to the rectangle's size (at most 8K a side) */
+    if (mode == UPSCALE_FSR && pipeline_easu && pipeline_rcas && (!gfx.hdr || !pipeline_hdr || pipeline_rcas_hdr)) {
+        uint32_t ow = (uint32_t)std::min(uw + 0.5f, 7680.0f), oh = (uint32_t)std::min(uh + 0.5f, 7680.0f);
+        if (!ensure_image(midimg, ow, oh, mid_set, "FSR 1 to"))
+            return;
+        UpPush u = {};
+        u.size[0] = (float)w;
+        u.size[1] = (float)h;
+        u.size[2] = 1.0f / w;
+        u.size[3] = 1.0f / h;
+        u.outp[0] = (float)ow;
+        u.outp[1] = (float)oh;
+        draw_into(cmd, midimg);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_easu);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_layout, 0, 1, &up_set, 0, nullptr);
+        vkCmdPushConstants(cmd, up_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u), &u);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        midimg.drawn_frame = gfx.frame_number;
+    }
+
+    /* FSRCNNX: the brightness, doubled */
+    if (mode == UPSCALE_FSRCNNX && pipeline_luma && pipeline_merge && (!gfx.hdr || !pipeline_hdr || pipeline_merge_hdr)) {
+        if (!ensure_image(lumaimg, w, h, luma_set, "brightness"))
+            return;
+        UpPush u = {};
+        draw_into(cmd, lumaimg);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_luma);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_layout, 0, 1, &up_set, 0, nullptr);
+        vkCmdPushConstants(cmd, up_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u), &u);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+        MpvImage out;
+        if (mpv_record(cmd, MPV_FSRCNNX, { lumaimg.view, w, h }, uw, uh, &out)) {
+            if (merge_written[0] != image_generation || merge_written[1] != mpv_plan_id() + 1) {
+                if (merge_written[1])
+                    vkDeviceWaitIdle(gfx.device); /* frames before may still read the set */
+                VkDescriptorImageInfo ii[2] = { { sampler, srcimg.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+                                                { sampler, out.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL } };
+                VkWriteDescriptorSet wr[2] = {};
+                for (int b = 0; b < 2; b++) {
+                    wr[b] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                    wr[b].dstSet = merge_set;
+                    wr[b].dstBinding = b;
+                    wr[b].descriptorCount = 1;
+                    wr[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    wr[b].pImageInfo = &ii[b];
+                }
+                vkUpdateDescriptorSets(gfx.device, 2, wr, 0, nullptr);
+                merge_written[0] = image_generation;
+                merge_written[1] = mpv_plan_id() + 1;
+            }
+            mpv_out = out;
+            mpv_drawn_frame = gfx.frame_number;
+        }
+    }
+    /* Anime4K: the whole picture, doubled (the heavy kind up to 1080p) */
+    if (mode == UPSCALE_ANIME4K) {
+        int set = a4k_tier == 0 ? MPV_A4K_HEAVY : a4k_tier == 1 ? MPV_A4K_MEDIUM : MPV_A4K_LIGHT;
+        MpvImage out;
+        if (mpv_record(cmd, set, { srcimg.view, w, h }, uw, uh, &out)) {
+            if (mpv_set_written[1] != mpv_plan_id() + 1) {
+                if (mpv_set_written[1])
+                    vkDeviceWaitIdle(gfx.device); /* frames before may still read the set */
+                VkDescriptorImageInfo ii = { sampler, out.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                wr.dstSet = mpv_set;
+                wr.dstBinding = 0;
+                wr.descriptorCount = 1;
+                wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                wr.pImageInfo = &ii;
+                vkUpdateDescriptorSets(gfx.device, 1, &wr, 0, nullptr);
+                mpv_set_written[1] = mpv_plan_id() + 1;
+            }
+            mpv_out = out;
+            mpv_drawn_frame = gfx.frame_number;
+        }
+    }
+    /* (key's image_generation after the images below were made) */
+    key.gen = image_generation;
+    prep_key = key;
+    prep_upload = planes.upload_frame;
+}
+
+/* the picture is on screen: the frame's upscaling time ends here */
+static void video_time_end(VkCommandBuffer cmd)
+{
+    int slot = (int)gfx.frame_slot;
+    if (time_pool && slot < GFX_FRAMES && time_started[slot] && !time_done[slot]) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, time_pool, slot * 2 + 1);
+        time_done[slot] = true;
+    }
+}
+
+void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
+{
+    if (!planes.has_picture)
+        return;
+    /* A new shape's first frame: the rectangle was worked out before the
+     * picture came, from the video before's shape. With the console's
+     * decoder the size and the first picture come in the same frame, and a
+     * portrait video flashed stretched over the whole screen after a 16:9
+     * one ("a frame from another video", caught by the log 2026-10-18).
+     * Nothing this one frame; the next is placed right. */
+    if (planes.new_shape_frame == gfx.frame_number) {
+        DIAG("diag draw: frame %llu skipped, the rectangle is the shape before's\n",
+                (unsigned long long)gfx.frame_number);
+        return;
+    }
+    if (diag_draws < 6) {
+        diag_draws++;
+        DIAG("diag draw: frame %llu, textures of setup %d (now %d), %ux%u at %.0f,%.0f %.0fx%.0f\n",
+                (unsigned long long)gfx.frame_number, planes.generation, generation, planes.buf_w,
+                planes.buf_h, x, y, w, h);
+    }
+    Push p;
+    fill_push(p, w, h);
     VkViewport vp = { x, y, w, h, 0, 1 };
     /* The scissor stays on screen ("Fill" makes the rectangle larger than it). */
     float sx0 = x < 0 ? 0 : x, sy0 = y < 0 ? 0 : y;
     float sx1 = x + w > gfx.width ? gfx.width : x + w, sy1 = y + h > gfx.height ? gfx.height : y + h;
     VkRect2D sc = { { (int32_t)sx0, (int32_t)sy0 },
                     { (uint32_t)(sx1 - sx0 + 0.5f), (uint32_t)(sy1 - sy0 + 0.5f) } };
+    /* Upscaled: pass 1 drew the picture this frame and the rectangle is
+     * bigger than it (turned a quarter, its sides swap) */
+    int umode = player_upscaler();
+    if (mpv_drawn_frame == gfx.frame_number && srcimg.drawn_frame == gfx.frame_number &&
+        (umode == UPSCALE_FSRCNNX || umode == UPSCALE_ANIME4K)) {
+        bool fsrcnnx = umode == UPSCALE_FSRCNNX;
+        UpPush u = {};
+        float sw = fsrcnnx ? (float)srcimg.w : (float)mpv_out.w, sh = fsrcnnx ? (float)srcimg.h : (float)mpv_out.h;
+        u.size[0] = sw;
+        u.size[1] = sh;
+        u.size[2] = 1.0f / sw;
+        u.size[3] = 1.0f / sh;
+        u.xform[0] = (float)picture.rotate;
+        u.xform[1] = picture.mirror ? 1.0f : 0.0f;
+        u.xform[2] = picture.upside_down ? 1.0f : 0.0f;
+        /* Anime4K's result already the rectangle's size: pixel for pixel */
+        bool exact = fabsf(w - (picture.rotate & 1 ? sh : sw)) < 1 && fabsf(h - (picture.rotate & 1 ? sw : sh)) < 1;
+        u.xform[3] = !fsrcnnx && exact ? 0.0f : (float)UPSCALE_EWA;
+        u.outp[0] = (float)mpv_out.w;
+        u.outp[1] = (float)mpv_out.h;
+        bool hdr = gfx.hdr && pipeline_hdr;
+        if (fsrcnnx) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, hdr ? pipeline_merge_hdr : pipeline_merge);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, merge_layout, 0, 1, &merge_set, 0, nullptr);
+            vkCmdPushConstants(cmd, merge_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u), &u);
+        } else {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, hdr ? pipeline_up_hdr : pipeline_up);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_layout, 0, 1, &mpv_set, 0, nullptr);
+            vkCmdPushConstants(cmd, up_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u), &u);
+        }
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        video_time_end(cmd);
+        return;
+    }
+    if (midimg.drawn_frame == gfx.frame_number && midimg.image && umode == UPSCALE_FSR) {
+        UpPush u = {};
+        u.size[0] = (float)midimg.w;
+        u.size[1] = (float)midimg.h;
+        u.size[2] = 1.0f / midimg.w;
+        u.size[3] = 1.0f / midimg.h;
+        u.xform[0] = (float)picture.rotate;
+        u.xform[1] = picture.mirror ? 1.0f : 0.0f;
+        u.xform[2] = picture.upside_down ? 1.0f : 0.0f;
+        u.xform[3] = FSR_SHARPNESS;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          gfx.hdr && pipeline_hdr ? pipeline_rcas_hdr : pipeline_rcas);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_layout, 0, 1, &mid_set, 0, nullptr);
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdPushConstants(cmd, up_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u), &u);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        video_time_end(cmd);
+        return;
+    }
+    if (srcimg.drawn_frame == gfx.frame_number && srcimg.image && umode != UPSCALE_FSR) {
+        UpPush u = {};
+        u.size[0] = (float)srcimg.w;
+        u.size[1] = (float)srcimg.h;
+        u.size[2] = 1.0f / srcimg.w;
+        u.size[3] = 1.0f / srcimg.h;
+        u.xform[0] = (float)picture.rotate;
+        u.xform[1] = picture.mirror ? 1.0f : 0.0f;
+        u.xform[2] = picture.upside_down ? 1.0f : 0.0f;
+        /* FSRCNNX and Anime4K when their shaders said no (too little to
+         * enlarge) or failed: EWA */
+        u.xform[3] = (float)(umode == UPSCALE_BICUBIC || umode == UPSCALE_LANCZOS ? umode : UPSCALE_EWA);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gfx.hdr && pipeline_hdr ? pipeline_up_hdr : pipeline_up);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_layout, 0, 1, &up_set, 0, nullptr);
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdPushConstants(cmd, up_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u), &u);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        video_time_end(cmd);
+        return;
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gfx.hdr && pipeline_hdr ? pipeline_hdr : pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_layout, 0, 1, &desc_set, 0,
                             nullptr);
@@ -2980,6 +3673,7 @@ void video_draw(VkCommandBuffer cmd, float x, float y, float w, float h)
     vkCmdPushConstants(cmd, pipe_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                        sizeof(p), &p);
     vkCmdDraw(cmd, 3, 1, 0, 0);
+    video_time_end(cmd);
 }
 
 void player_view(float yaw, float pitch, float fov)

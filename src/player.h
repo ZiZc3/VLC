@@ -89,6 +89,21 @@ void player_spectrum(float *bands, int n);
 
 /* Render thread, every frame: */
 void video_upload(VkCommandBuffer cmd);           /* before the render pass */
+/* Upscaling's first pass (the picture at its own size), after video_upload,
+ * before the render pass */
+void video_prepare(VkCommandBuffer cmd, float rect_w, float rect_h);
+
+/* How a picture smaller than its rectangle is enlarged (PLAN-UPSCALING.txt),
+ * saved in prefs.txt "upscale". Bilinear is the GPU's own (as before). */
+enum { UPSCALE_BILINEAR, UPSCALE_BICUBIC, UPSCALE_LANCZOS, UPSCALE_FSR, UPSCALE_EWA, UPSCALE_FSRCNNX,
+       UPSCALE_ANIME4K, UPSCALE_COUNT };
+int player_upscaler();
+void player_set_upscaler(int mode);
+const char *player_upscaler_name(int mode);
+/* The upscaler before or after this one in the list offered (the user's
+ * list, 2026-10-20: no Bilinear or Bicubic to pick; Bilinear stays only
+ * for 4K on a 4K screen and 360° videos, by itself) */
+int player_upscaler_step(int mode, int dir);
 bool video_has_picture();
 /* seconds since the video was opened */
 double player_open_age();

@@ -174,7 +174,7 @@ std::string vlc_message(const std::string &m)
     /* libbluray without a JVM (none runs on the console): not "install Java".
      * Said plainly: "it plays without them" promised a film that often
      * didn't come (the user, 2026-10-18). */
-    if (m.compare(0, 30, "This Blu-ray disc requires Java") == 0)
+    if (m.compare(0, 31, "This Blu-ray disc requires Java") == 0) /* (30 never matched: 31 letters) */
         return "Java Blu-ray discs (BD-J) aren't supported on the PS5";
     if (m.compare(0, 6, "Track ") == 0 && m.size() > 6 && isdigit((unsigned char)m[6]))
         return trf("Track %d", atoi(m.c_str() + 6));
@@ -900,6 +900,7 @@ int64_t pending_resume;
 const char *info_title;
 std::vector<std::string> info_lines;
 std::string details_for; /* DETAILS: the file */
+std::string details_name; /* DETAILS: a network file's name (no library item) */
 std::string delete_path;  /* CONFIRM_DELETE: the file or folder */
 Modal delete_back = NONE; /* where Cancel goes */
 int settings_cat;        /* SETTINGS: the category in focus */
@@ -1091,6 +1092,19 @@ bool is_playlist_url(const std::string &url)
     return !strcasecmp(x, "m3u") || !strcasecmp(x, "pls");
 }
 
+/* A zip, rar or 7z: opened like a folder, on a share too (played as a video
+ * it failed, 2026-10-18; VLC's archive reader lists it over smb:// as it
+ * does for a file on the console). */
+bool is_archive_url(const std::string &url)
+{
+    std::string u = url.substr(0, url.find('?'));
+    size_t dot = u.rfind('.');
+    if (dot == std::string::npos || u.find('/', dot) != std::string::npos)
+        return false;
+    const char *x = u.c_str() + dot + 1;
+    return !strcasecmp(x, "zip") || !strcasecmp(x, "rar") || !strcasecmp(x, "7z");
+}
+
 /* file:///abs/path with everything but plain characters escaped. */
 std::string file_uri(std::string path)
 {
@@ -1119,8 +1133,8 @@ void rebuild_browse()
     if (!net_path.empty()) {
         if (net_list_state() == NET_READY)
             for (const NetEntry &e : net_list_entries()) {
-                /* a channel list on a share opens like a folder */
-                bool list = !e.dir && is_playlist_url(e.url);
+                /* a channel list or an archive on a share opens like a folder */
+                bool list = !e.dir && (is_playlist_url(e.url) || is_archive_url(e.url));
                 browse_entries.push_back({ e.name, e.url, e.dir, -1, list, e.dir || list ? NET_DIR : NET_FILE });
             }
         return;
@@ -1788,8 +1802,16 @@ void library_actions()
     if (tab == BROWSE && hit(PAD_SQUARE) && browse_focus < (int)browse_entries.size() &&
         browse_entries[browse_focus].net != NET_NONE) {
         const BrowseEntry &e = browse_entries[browse_focus];
-        if (e.net == NET_SERVER && net_is_saved_server(e.path))
+        if (e.net == NET_SERVER && net_is_saved_server(e.path)) {
             ask_delete(e.path, NONE);
+        } else if (e.net == NET_FILE) {
+            /* a file on a share or a media server: read over the network */
+            details_for = e.path;
+            details_name = e.name;
+            library_details(details_for, net_login_options(e.path));
+            modal = DETAILS;
+            modal_anim = 0;
+        }
         return;
     }
     if (tab == BROWSE && hit(PAD_SQUARE) && browse_focus < (int)browse_entries.size()) {
@@ -2645,6 +2667,11 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
         } else {
             *type = "Live stream";
         }
+    } else if (e.playlist && is_archive_url(e.path)) {
+        std::string ext = e.path.substr(e.path.rfind('.') + 1);
+        for (char &c : ext)
+            c = (char)toupper((unsigned char)c);
+        *type = trf("Compressed (%s)", ext.c_str());
     } else if (e.playlist) {
         *type = "Playlist";
     } else if (e.dir && browse_dir.empty()) {
@@ -2695,6 +2722,8 @@ void classic_icon(const BrowseEntry &e, float cx, float cy, float s)
         e.path == library_media_dir() ? ci_folder(cx, cy, s) : ci_drive(cx, cy, s, e.path.find("/usb") != std::string::npos);
     else if (e.dir)
         ci_folder(cx, cy, s);
+    else if (e.playlist && is_archive_url(e.path))
+        ci_zip(cx, cy, s);
     else if (e.playlist)
         ci_file(cx, cy, s, 2);
     else if (L()[e.item].disc)
@@ -3120,6 +3149,8 @@ void tab_browse()
                 icon_film(146, y + 33, 34, C_DIM);
         }
         else if (e.dir)
+            icon_folder(146, y + 33, 34, mix(C_DIM, C_ORANGE, f));
+        else if (e.playlist && is_archive_url(e.path))
             icon_folder(146, y + 33, 34, mix(C_DIM, C_ORANGE, f));
         else if (e.playlist)
             icon_list(146, y + 33, 30, mix(C_DIM, C_ORANGE, f));
@@ -4709,7 +4740,7 @@ void modal_about()
                  std::string("FFmpeg 8.1.2, dav1d 1.5.4, libmatroska 1.7.2, libebml 1.4.6, libdvbpsi 1.3.3, libass 0.17.5, "
                  "FreeType 2.13.3, HarfBuzz 10.4.0, FriBidi 1.0.16, GnuTLS 3.8.13, Nettle 3.10.2, GMP 6.3.0, "
                  "libsmb2 6.1, libupnp 1.14.31, libxml2 2.15.3, libdvdread 6.1.3, libdvdnav 6.1.1, libbluray 1.4.1, "
-                 "libarchive 3.8.9, zlib 1.3.1, Mesa RADV (Vulkan), Dear ImGui 1.92.9, stb_image. ") +
+                 "libarchive 3.8.9, zlib 1.3.1, Mesa RADV (Vulkan), Dear ImGui 1.92.9, stb_image, AMD FidelityFX FSR 1 (MIT), FSRCNNX by igv (LGPL-3.0), Anime4K by bloc97 (MIT). ") +
                      tr("Fonts: Selawik, Inter, Noto, DejaVu (OFL). TV lists: iptv-org. Radio: radio-browser.info. Subtitles: OpenSubtitles.com."),
                  tw, 6);
     text(f_reg, 17, tx, y + h - 52, alpha(C_FAINT, a),
@@ -4913,14 +4944,14 @@ void setup_begin(bool with_logo);
 enum {
     ST_DECODING, ST_ALANG, ST_SLANG, ST_SOUND, ST_NIGHT, ST_SPEAKERS, ST_THEME, ST_HAPTICS,
     ST_SWIPES, ST_REPEAT, ST_SHUFFLE, ST_DEBUG, ST_STORAGE, ST_VERSION, ST_RELOAD, ST_ABOUT,
-    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_COUNT
+    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_UPSCALE, ST_COUNT
 };
 const char *const st_labels[ST_COUNT] = {
     "Decoding", "Audio language", "Subtitle language", "Sound output", "Night mode",
     "Speaker test", "Theme", "Controller vibration", "Touchpad swipes", "Repeat the list", "Shuffle",
     "Detailed log", "Storage", "Version", "Reload drives", "About VLC", "Phone access", "Look",
     "Subtitle downloads", "Language", "Run setup again", "Blu-ray region", "Hardware decoding",
-    "Match frame rate",
+    "Match frame rate", "Upscaling",
 };
 /* One line under the focused setting: what it does. */
 const char *const st_help[ST_COUNT] = {
@@ -4948,6 +4979,7 @@ const char *const st_help[ST_COUNT] = {
     "A: the Americas and East Asia. B: Europe, Africa and Oceania. C: China, Russia and India",
     "The console's video chip. Off: the processor decodes, slower for 4K",
     "Films play at their own 24, 25 or 50 Hz: smoother pans. Some TVs go black a moment",
+    "Enlarges smaller videos. FSRCNNX: films. Anime4K: anime",
 };
 
 /* Categories: an icon, a name, and their settings. */
@@ -4959,7 +4991,7 @@ struct SettingsCat {
 enum { SI_PLAY, SI_SOUND, SI_THEME, SI_LIST, SI_GEAR, SI_VIDEO };
 const SettingsCat settings_cats[] = {
     { "Playback", SI_PLAY, { ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION } },
-    { "Video", SI_VIDEO, { ST_HWDEC, ST_MATCH, ST_DECODING } },
+    { "Video", SI_VIDEO, { ST_HWDEC, ST_UPSCALE, ST_MATCH, ST_DECODING } },
     { "Sound", SI_SOUND, { ST_SOUND, ST_NIGHT, ST_SPEAKERS } },
     { "Interface", SI_THEME, { ST_UILANG, ST_LOOK, ST_THEME, ST_SWIPES } },
     { "Playlists", SI_LIST, { ST_REPEAT, ST_SHUFFLE } },
@@ -5085,6 +5117,7 @@ void setting_icon(int id, float cx, float cy, float s, ImU32 col)
     switch (id) {
     case ST_DECODING: case ST_HWDEC: si_chip(cx, cy, s, col); break;
     case ST_MATCH: icon_speed(cx, cy, s * 0.8f, col); break;
+    case ST_UPSCALE: icon_picture(cx, cy, s * 0.85f, col); break;
     case ST_ALANG: case ST_UILANG: si_globe(cx, cy, s, col); break;
     case ST_SLANG: case ST_OSUB: icon_cc(cx, cy, s * 0.9f, col); break;
     case ST_BDREGION: si_globe(cx, cy, s, col); break;
@@ -5133,6 +5166,7 @@ std::string st_value(int id)
     case ST_DECODING: return dec[player_decode_mode()];
     case ST_HWDEC: return player_hw_decoding() ? "On" : "Off";
     case ST_MATCH: return player_match_rate() ? "On" : "Off";
+    case ST_UPSCALE: return player_upscaler_name(player_upscaler());
     case ST_ALANG: return lang_name(player_audio_language(), false);
     case ST_SLANG: return lang_name(player_sub_language(), true);
     case ST_SOUND: return player_audio_output() ? "Surround 5.1 / 7.1" : "Stereo";
@@ -5173,6 +5207,7 @@ void st_change(int id, int step)
         player_set_decode_mode((DecodeMode)((player_decode_mode() + 3 + dir) % 3));
         break;
     case ST_MATCH: player_set_match_rate(!player_match_rate()); break;
+    case ST_UPSCALE: player_set_upscaler(player_upscaler_step(player_upscaler(), dir)); break;
     case ST_HWDEC:
         player_set_hw_decoding(!player_hw_decoding());
         if (player_active())
@@ -5620,7 +5655,9 @@ void modal_details()
     float x = 960 - w / 2, y = 540 - h / 2 + (1 - a) * 40;
     panel(x, y, w, h, a);
     MediaItem *m = library_find(details_for);
-    text(f_bold, 32, x + 48, y + 38, alpha(C_TEXT, a), m ? m->name.c_str() : "Details", 0, w - 96);
+    bool remote = details_for.find("://") != std::string::npos;
+    text(f_bold, 32, x + 48, y + 38, alpha(C_TEXT, a),
+         m ? m->name.c_str() : remote && !details_name.empty() ? details_name.c_str() : "Details", 0, w - 96);
     if (!d.ready) {
         spinner(x + 70, y + 140, 18);
         text(f_reg, 23, x + 104, y + 126, alpha(C_DIM, a), "Reading the file...");
@@ -5630,8 +5667,12 @@ void modal_details()
         text(f_semi, 22, x + 48, ry, alpha(C_FAINT, a), d.rows[i].first.c_str());
         text(f_reg, 23, x + 230, ry - 1, alpha(C_TEXT, a), d.rows[i].second.c_str(), 0, w - 290);
     }
-    hints(x + w - 40, y + h - 40, { { PAD_SQUARE, "Delete" }, { PAD_CIRCLE, "Close" } }, a);
-    if (hit(PAD_SQUARE)) {
+    /* a network file can't be deleted from here */
+    if (remote)
+        hints(x + w - 40, y + h - 40, { { PAD_CIRCLE, "Close" } }, a);
+    else
+        hints(x + w - 40, y + h - 40, { { PAD_SQUARE, "Delete" }, { PAD_CIRCLE, "Close" } }, a);
+    if (!remote && hit(PAD_SQUARE)) {
         ask_delete(details_for, DETAILS);
         return;
     }
@@ -5810,7 +5851,7 @@ bool playing_disc()
 enum {
     SET_AUDIO_DELAY, SET_EQ, SET_SUB_DELAY, SET_SUB_SIZE, SET_SUB_COLOUR, SET_SUB_BOX, SET_SLEEP,
     SET_LOOP, SET_DEINT, SET_BRIGHT, SET_CONTRAST, SET_SAT, SET_GAMMA, SET_HUE, SET_ROTATE, SET_FLIP,
-    SET_SHARPEN, SET_PIC_RESET,
+    SET_UPSCALE, SET_PIC_RESET,
     SET_SOUND_OUT, SET_NIGHT, SET_REPEAT, SET_SHUFFLE, SET_BOOKMARK, SET_BM_CLEAR, SET_OSUB,
     SET_DISC_MENU, SET_POPUP, SET_SUB_PICK,
 };
@@ -5870,7 +5911,7 @@ std::string setting_value(int id)
     }
     case SET_FLIP:
         return pa.mirror && pa.upside_down ? "Both ways" : pa.mirror ? "Mirror" : pa.upside_down ? "Upside down" : "Off";
-    case SET_SHARPEN: return pa.sharpen ? std::to_string(pa.sharpen) + "%" : "Off";
+    case SET_UPSCALE: return player_upscaler_name(player_upscaler());
     case SET_SOUND_OUT: return player_audio_output() ? "Surround" : "Stereo";
     case SET_NIGHT: return player_night_mode() ? "On" : "Off";
     case SET_REPEAT: return loop_on() ? "On" : "Off";
@@ -5976,7 +6017,10 @@ void setting_change(int id, int step)
         pa.upside_down = f & 2;
         break;
     }
-    case SET_SHARPEN: pa.sharpen = step ? clamp(pa.sharpen + step * 10, 0, 100) : 0; break;
+    case SET_UPSCALE:
+        /* for every video from now on (the default in Settings > Video too) */
+        player_set_upscaler(step ? player_upscaler_step(player_upscaler(), step) : UPSCALE_BILINEAR);
+        break;
     case SET_SOUND_OUT:
         player_set_audio_output(!player_audio_output());
         toast("From the next file you open", 2);
@@ -6106,13 +6150,13 @@ void modal_tracks()
         e.push_back({ 0, 0, "Picture", false, "" });
         for (int i = 0; i < PIC_MODES; i++)
             e.push_back({ 4, i, aspect_names[i], aspect_mode == i, "" });
+        e.push_back({ 7, SET_UPSCALE, "Upscaling", false, "" });
         e.push_back({ 7, SET_DEINT, "Deinterlace", false, "" });
         e.push_back({ 7, SET_BRIGHT, "Brightness", false, "" });
         e.push_back({ 7, SET_CONTRAST, "Contrast", false, "" });
         e.push_back({ 7, SET_SAT, "Saturation", false, "" });
         e.push_back({ 7, SET_GAMMA, "Gamma", false, "" });
         e.push_back({ 7, SET_HUE, "Hue", false, "" });
-        e.push_back({ 7, SET_SHARPEN, "Sharpen", false, "" });
         e.push_back({ 7, SET_ROTATE, "Rotate", false, "" });
         e.push_back({ 7, SET_FLIP, "Flip", false, "" });
         e.push_back({ 7, SET_PIC_RESET, "Reset picture", false, "" });
@@ -8062,6 +8106,9 @@ void ui_frame(const PadState &pad, float frame_dt)
             } else if (tab == BROWSE && browse_focus < (int)browse_entries.size() &&
                        browse_entries[browse_focus].net == NET_SERVER && net_is_saved_server(browse_entries[browse_focus].path)) {
                 h.push_back({ PAD_SQUARE, "Forget" });
+            } else if (tab == BROWSE && browse_focus < (int)browse_entries.size() &&
+                       browse_entries[browse_focus].net == NET_FILE) {
+                h.push_back({ PAD_SQUARE, "Details" });
             } else if (tab == BROWSE && browse_focus < (int)browse_entries.size() &&
                        browse_entries[browse_focus].net == NET_NONE &&
                        (browse_entries[browse_focus].playlist || !browse_dir.empty())) {

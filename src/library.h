@@ -97,5 +97,8 @@ int library_count_files(const std::string &path); /* files in a folder (1 for a 
 /* Favourites (△), remembered in cache/favourites.txt. Returns the new state. */
 bool library_toggle_favourite(const std::string &path);
 /* The first call starts reading the file; later calls see it fill in. */
-const MediaDetails &library_details(const std::string &path);
+/* path: a file on the console, or an address (smb://, upnp://, http://...)
+ * with its login options, read over the network */
+const MediaDetails &library_details(const std::string &path,
+                                    const std::vector<std::string> &options = {});
 std::string format_time(int64_t ms);

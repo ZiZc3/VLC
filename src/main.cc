@@ -168,6 +168,8 @@ int main(void)
         video_upload(cmd);
         float vx, vy, vw, vh;
         bool video = ui_video_rect(&vx, &vy, &vw, &vh);
+        /* upscaling's passes before the screen's (they need the rectangle's size) */
+        video_prepare(cmd, video ? vw : 0, video ? vh : 0);
         if (gfx.hdr) {
             /* the UI in its layer, then the video as PQ and the layer over it */
             gfx_begin_ui_pass(cmd);

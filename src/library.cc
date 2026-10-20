@@ -796,19 +796,55 @@ std::string fourcc_name(int type, uint32_t codec)
     return f;
 }
 
-void details_main(std::string path, int64_t size, std::string ext)
+/* A network address's "%20"-style escapes, for the name shown. */
+std::string unescape_url(const std::string &s)
+{
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) &&
+            isxdigit((unsigned char)s[i + 2])) {
+            out += (char)strtol(s.substr(i + 1, 2).c_str(), nullptr, 16);
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+void details_main(std::string path, int64_t size, std::string ext, std::vector<std::string> options)
 {
     MediaDetails d;
-    d.rows.push_back({ "File", path.substr(path.rfind('/') + 1) });
-    d.rows.push_back({ "Folder", path.substr(0, path.rfind('/')) });
-    d.rows.push_back({ "Size", human_size(size) });
-    libvlc_media_t *m = libvlc_media_new_path(player_vlc(), path.c_str());
+    bool url = path.find("://") != std::string::npos;
+    std::string shown = url ? unescape_url(path.substr(0, path.find('?'))) : path;
+    d.rows.push_back({ "File", shown.substr(shown.rfind('/') + 1) });
+    d.rows.push_back({ "Folder", shown.substr(0, shown.rfind('/')) });
+    if (size > 0)
+        d.rows.push_back({ "Size", human_size(size) });
+    if (url && ext.empty()) {
+        size_t dot = shown.rfind('.');
+        if (dot != std::string::npos && shown.find('/', dot) == std::string::npos) {
+            ext = shown.substr(dot + 1);
+            for (char &c : ext)
+                c = (char)toupper((unsigned char)c);
+        }
+    }
+    libvlc_media_t *m = url ? libvlc_media_new_location(player_vlc(), path.c_str())
+                            : libvlc_media_new_path(player_vlc(), path.c_str());
     if (m) {
-        libvlc_media_parse_with_options(m, libvlc_media_parse_local, 5000);
-        for (int i = 0; i < 120 && libvlc_media_get_parsed_status(m) == 0; i++)
+        for (const std::string &o : options)
+            libvlc_media_add_option(m, o.c_str());
+        /* a file on a share or a server: read over the network (slower) */
+        libvlc_media_parse_with_options(m, url ? libvlc_media_parse_network : libvlc_media_parse_local,
+                                        url ? 15000 : 5000);
+        for (int i = 0; i < (url ? 320 : 120) && libvlc_media_get_parsed_status(m) == 0; i++)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (url && libvlc_media_get_parsed_status(m) != libvlc_media_parsed_status_done)
+            d.rows.push_back({ "Status", "Couldn't read the file over the network" });
         int64_t len = libvlc_media_get_duration(m);
-        if (len > 0) {
+        if (len > 0 && size <= 0) {
+            d.rows.push_back({ "Length", format_time(len) });
+        } else if (len > 0) {
             d.rows.push_back({ "Length", format_time(len) });
             char br[32];
             snprintf(br, sizeof(br), "%.1f Mbit/s", size * 8.0 / (len / 1000.0) / 1e6);
@@ -1352,14 +1388,14 @@ bool library_toggle_favourite(const std::string &path)
     return now_on;
 }
 
-const MediaDetails &library_details(const std::string &path)
+const MediaDetails &library_details(const std::string &path, const std::vector<std::string> &options)
 {
     std::lock_guard<std::mutex> l(details_lock);
     if (details_path != path) {
         details_path = path;
         details = MediaDetails{};
         MediaItem *m = library_find(path);
-        std::thread(details_main, path, m ? m->size : 0, m ? m->ext : std::string()).detach();
+        std::thread(details_main, path, m ? m->size : 0, m ? m->ext : std::string(), options).detach();
     }
     details_copy = details;
     return details_copy;
