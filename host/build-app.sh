@@ -48,7 +48,7 @@ done
 compile "$repo/third_party/imgui/backends/imgui_impl_vulkan.cpp" g++ -std=c++17
 compile "$repo/third_party/volk/volk.c" gcc -std=c11
 compile "$repo/src/platform_host.c" gcc -std=gnu11
-for f in gfx image prefs player subconv library network osub lang web ui main; do
+for f in gfx image prefs player mpvshader subconv library network osub lang web ui main; do
     compile "$repo/src/$f.cc" g++ -std=c++17 -Wno-missing-field-initializers
 done
 gcc -O2 -c "$static/static_modules.c" -o "$obj/static_modules.o"

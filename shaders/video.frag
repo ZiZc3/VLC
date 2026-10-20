@@ -22,7 +22,7 @@ layout(push_constant) uniform Push {
     vec4 view;   // 360: yaw, pitch, tan(fov / 2), screen aspect
     vec4 xform;  // quarter turns clockwise, mirror, upside down, sharpen amount
     vec4 hdr;    // transfer (0 SDR, 1 PQ, 2 HLG), peak (nits), BT.2020 primaries (1), NV12/P010 (1)
-    vec4 outp;   // HDR10 output (1): PQ, BT.2020; -, -, -
+    vec4 outp;   // HDR10 output (1): PQ, BT.2020; spline36 chroma (1); -, -
 } pc;
 
 /* HDR to SDR, the same sums as hdr_to_sdr() in player.cc (screenshots). */
@@ -143,25 +143,57 @@ vec2 spherical_uv()
     return vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.14159265) * pc.uv_scale;
 }
 
+/* Spline36, the chroma scaler (standard spline weights) */
+float spline36(float x)
+{
+    x = abs(x);
+    if (x < 1.0)
+        return ((13.0 / 11.0 * x - 453.0 / 209.0) * x - 3.0 / 209.0) * x + 1.0;
+    if (x < 2.0) {
+        x -= 1.0;
+        return ((-6.0 / 11.0 * x + 270.0 / 209.0) * x - 156.0 / 209.0) * x;
+    }
+    if (x < 3.0) {
+        x -= 2.0;
+        return ((1.0 / 11.0 * x - 45.0 / 209.0) * x + 26.0 / 209.0) * x;
+    }
+    return 0.0;
+}
+
+/* The two chroma samples at `at`, enlarged by Spline36 (6x6) instead of
+ * the GPU's bilinear: cleaner colour edges (most videos keep colour at half
+ * size). Used when an upscaler draws the picture at its own size first. */
+vec2 chroma_spline36(vec2 at)
+{
+    vec2 size = vec2(textureSize(tex_u, 0));
+    vec2 p = at * size - 0.5;
+    vec2 base = floor(p);
+    vec2 f = p - base;
+    vec2 sum = vec2(0.0);
+    float weight = 0.0;
+    for (int j = -2; j <= 3; j++) {
+        float wy = spline36(float(j) - f.y);
+        for (int i = -2; i <= 3; i++) {
+            float w = wy * spline36(float(i) - f.x);
+            ivec2 q = clamp(ivec2(base) + ivec2(i, j), ivec2(0), ivec2(size) - 1);
+            vec2 c = pc.hdr.w > 0.5 ? texelFetch(tex_u, q, 0).rg
+                                    : vec2(texelFetch(tex_u, q, 0).r, texelFetch(tex_v, q, 0).r);
+            sum += c * w;
+            weight += w;
+        }
+    }
+    return sum / weight;
+}
+
 void main()
 {
     float s = pc.params.x;
     vec2 at = pc.params.w > 0.5 ? spherical_uv() : turned_uv();
     float y = texture(tex_y, at).r * s;
-    if (pc.xform.w > 0.0) {
-        /* sharpen: the luma pushed away from the average of the 3x3 around
-         * it (an unsharp mask), the edges' halo kept in range */
-        vec2 t = 1.0 / vec2(textureSize(tex_y, 0));
-        float around = 0.0;
-        for (int dy = -1; dy <= 1; dy++)
-            for (int dx = -1; dx <= 1; dx++)
-                if (dx != 0 || dy != 0)
-                    around += texture(tex_y, at + vec2(float(dx), float(dy)) * t).r;
-        y = clamp(y + (y - around * 0.125 * s) * pc.xform.w, 0.0, 1.0);
-    }
     /* NV12 / P010: U and V side by side in the second plane */
-    vec2 chroma = pc.hdr.w > 0.5 ? texture(tex_u, at).rg
-                                 : vec2(texture(tex_u, at).r, texture(tex_v, at).r);
+    vec2 chroma = pc.outp.y > 0.5 ? chroma_spline36(at)
+                : pc.hdr.w > 0.5   ? texture(tex_u, at).rg
+                                   : vec2(texture(tex_u, at).r, texture(tex_v, at).r);
     float u = chroma.x * s - 0.5;
     float v = chroma.y * s - 0.5;
     if (pc.params.y > 0.5) {
