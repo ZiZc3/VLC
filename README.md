@@ -24,6 +24,7 @@
 - Plays nearly anything VLC plays: H.264, HEVC (8 and 10-bit), AV1, VP9, VC-1, MPEG-2 and more, up to 4K, with every common audio format, including TrueHD, DTS-HD and Opus.
 - **Hardware decoding** on the PS5's video chip for H.264 and HEVC up to 4K, 10-bit HDR included.
 - **HDR**: HDR10 and HLG go to an HDR TV as HDR, and are tone mapped with natural colours on an SDR one. Dolby Vision files play as their HDR10 base.
+- **Upscaling to 4K** for smaller videos (Off by default): EWA Lanczos Sharp, AMD FSR, FSRCNNX for films and shows, and Anime4K for anime.
 - **Library** with Home, Videos, Music, Playlists and Browse: thumbnails, Continue watching, Favourites and search.
 - **Playlists**: make your own, add any video or song from anywhere with Options, reorder them; covers made from their videos; `.m3u` files on your drives play too.
 - **Subtitles** in every script, styled ASS/SSA, size and colour, delay, plus **OpenSubtitles** downloads.
@@ -108,7 +109,7 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | HDR → SDR tone mapping | ✅ |
 | HDR10 output to the TV | ✅ |
 | Hardware decoding (VP9 up to 4K) | ✅ |
-| Upscaling up to 4K (FSR 1, Lanczos, Anime4K etc) | Not yet |
+| Upscaling up to 4K (EWA Lanczos, AMD FSR, FSRCNNX, Anime4K) | ✅ |
 
 ### 🔊 Audio
 
@@ -216,6 +217,10 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 - **[VLC](https://www.videolan.org/)** by VideoLAN and its contributors, and **[FFmpeg](https://ffmpeg.org/)**.
 - **[Mihawk-99](https://github.com/mihawk-99)**: [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan), RADV on the PS5.
 - **[ps5-payload-dev SDK](https://github.com/ps5-payload-dev/sdk)**, **[kstuff](https://github.com/EchoStretch/kstuff)**, **[etaHEN](https://github.com/LightningMods/etaHEN)**, **[ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)** and the PS5 scene.
+- **[AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR)** (MIT licence, `third_party/fsr1`): the FSR 1 upscaler.
+- **[FSRCNNX](https://github.com/igv/FSRCNN-TensorFlow)** by igv (LGPL-3.0, `third_party/mpv-shaders/fsrcnnx`): the FSRCNNX upscaler, run from its mpv shader file.
+- **[Anime4K](https://github.com/bloc97/Anime4K)** by bloc97 (MIT licence, `third_party/mpv-shaders/anime4k`): the Anime4K upscaler, run from its mpv shader files.
+- The idea of using these mpv shaders together comes from [mpv-anime-build](https://github.com/Chinna95P/mpv-anime-build) by Chinna95P.
 - **[Dear ImGui](https://github.com/ocornut/imgui)**, [volk](https://github.com/zeux/volk), [stb](https://github.com/nothings/stb), GnuTLS, libsmb2, libupnp, libxml2, libass, FreeType, FriBidi, HarfBuzz, libdvdnav, libbluray and libarchive.
 - Fonts: **[Inter](https://rsms.me/inter/)**, **Selawik**, **DejaVu Sans Mono** and **Noto**.
 - [iptv-org](https://github.com/iptv-org/iptv), [radio-browser.info](https://www.radio-browser.info/) and [OpenSubtitles](https://www.opensubtitles.com/).
