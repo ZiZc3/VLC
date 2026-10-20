@@ -9,3 +9,4 @@ for s in "$repo"/shaders/*.vert "$repo"/shaders/*.frag; do
     [[ -f $out && $out -nt $s ]] && continue
     glslangValidator -V --target-env vulkan1.1 --vn "spv_$name" "$s" -o "$out" >/dev/null
 done
+python3 "$repo/ps5/mpv-shaders.py" >/dev/null
