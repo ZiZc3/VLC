@@ -46,45 +46,6 @@ Download the [latest release](../../releases/latest), then:
 
 Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
 
-## Controls
-
-**Library**
-
-| Button | Action |
-|---|---|
-| D-Pad | Move |
-| ✕ | Play / open |
-| ○ | Back |
-| △ | Favourite |
-| □ | Details / delete |
-| L1 / R1 | Switch tabs |
-| L2 / R2 | Jump A–Z |
-| R3 | Search |
-| Options | Settings, search, network link, phone… |
-
-**Player**
-
-| Button | Action |
-|---|---|
-| ✕ | Play / pause |
-| ← / → | Back / forward 10 s |
-| L2 / R2 | Back / forward 30 s |
-| L1 / R1 | Previous / next chapter (or file) |
-| △ | Tracks: audio, subtitles, playback, picture |
-| □ | Next frame (while paused) |
-| L3 | Screenshot |
-| Touchpad | Show the controls · swipe to seek or change the volume |
-| ○ | Back |
-
-## Folders on the PS5
-
-| Path | What |
-|---|---|
-| `/data/homebrew/PPSA85300/media/` | The app's own media folder |
-| `/data/vlc/` | Your media on the console (needs full access) |
-| `/mnt/usb0` … `/mnt/usb7`, `/mnt/ext0` | USB and extended storage |
-| `/data/homebrew/PPSA85300/vlc-ps5.log` | Log of the last session (attach it when reporting a problem) |
-
 ## All VLC Features
 
 ✅ In the app.
@@ -195,6 +156,45 @@ Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sand
 | Blu-ray folders and ISOs (unprotected) | ✅ |
 | Blu-ray Java (BD-J) menus | ❌ Java Blu-ray menus not supported |
 | ZIP, RAR and 7z archives open like folders | ✅ |
+
+## Controls
+
+**Library**
+
+| Button | Action |
+|---|---|
+| D-Pad | Move |
+| ✕ | Play / open |
+| ○ | Back |
+| △ | Favourite |
+| □ | Details / delete |
+| L1 / R1 | Switch tabs |
+| L2 / R2 | Jump A–Z |
+| R3 | Search |
+| Options | Settings, search, network link, phone… |
+
+**Player**
+
+| Button | Action |
+|---|---|
+| ✕ | Play / pause |
+| ← / → | Back / forward 10 s |
+| L2 / R2 | Back / forward 30 s |
+| L1 / R1 | Previous / next chapter (or file) |
+| △ | Tracks: audio, subtitles, playback, picture |
+| □ | Next frame (while paused) |
+| L3 | Screenshot |
+| Touchpad | Show the controls · swipe to seek or change the volume |
+| ○ | Back |
+
+## Folders on the PS5
+
+| Path | What |
+|---|---|
+| `/data/homebrew/PPSA85300/media/` | The app's own media folder |
+| `/data/vlc/` | Your media on the console (needs full access) |
+| `/mnt/usb0` … `/mnt/usb7`, `/mnt/ext0` | USB and extended storage |
+| `/data/homebrew/PPSA85300/vlc-ps5.log` | Log of the last session (attach it when reporting a problem) |
 
 ## Building
 
