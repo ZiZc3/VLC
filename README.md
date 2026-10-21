@@ -224,6 +224,7 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 - **[Dear ImGui](https://github.com/ocornut/imgui)**, [volk](https://github.com/zeux/volk), [stb](https://github.com/nothings/stb), GnuTLS, libsmb2, libupnp, libxml2, libass, FreeType, FriBidi, HarfBuzz, libdvdnav, libbluray and libarchive.
 - Fonts: **[Inter](https://rsms.me/inter/)**, **Selawik**, **DejaVu Sans Mono** and **Noto**.
 - [iptv-org](https://github.com/iptv-org/iptv), [radio-browser.info](https://www.radio-browser.info/) and [OpenSubtitles](https://www.opensubtitles.com/).
+- **The "Redesign by Juxtopposed" look** is based on **["VLC Redesign" by Juxtopposed](https://github.com/juxtopposed)**, used under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and adapted for the PS5 and its controller. Thanks to [StickyGonzales' Cone](https://github.com/StickyGonzales/vlc-redesign-juxtopposed) for showing the design working on real VLC.
 
 ## License
 
