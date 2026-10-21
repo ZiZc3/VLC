@@ -186,6 +186,8 @@ cp "$repo/assets/fonts/"Inter-*.ttf "$repo/assets/fonts/Inter-OFL.txt" "$app/fon
 cp "$repo/assets/fonts/"Selawik-*.ttf "$repo/assets/fonts/Selawik-OFL.txt" "$app/fonts/"
 # The text viewer (.txt, .nfo art): DejaVu Sans Mono, box drawing and shades included.
 cp "$repo/assets/fonts/DejaVuSansMono.ttf" "$repo/assets/fonts/DejaVu-LICENSE.txt" "$app/fonts/"
+# DM Mono (OFL): the times in the Redesign by Juxtopposed look, as its design has them
+cp "$repo/assets/fonts/"DMMono-*.ttf "$repo/assets/fonts/DMMono-OFL.txt" "$app/fonts/"
 mkdir -p "$app/assets"
 cp "$repo/assets/vlc-logo.png" "$app/assets/"
 # The interface languages (src/lang.cc)

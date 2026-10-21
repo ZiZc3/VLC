@@ -140,11 +140,20 @@ void player_next_frame(); /* one picture on (pauses first) */
 /* The picture on screen as a PNG (written in the background). False if there's none. */
 bool player_screenshot(const std::string &path);
 
-/* Equalizer: -1 off, else one of VLC's presets (Rock, Pop, ...). Remembered. */
+/* Equalizer: -1 off, else one of VLC's presets (Rock, Pop, ...), or
+ * EQ_CUSTOM: the bands as set by hand. Remembered. */
+enum { EQ_CUSTOM = -2 };
 int player_eq_presets();
 const char *player_eq_name(int preset);
 int player_eq();
 void player_set_eq(int preset);
+/* Its bands (VLC's 10: 60 Hz to 16 kHz) and the preamp (band -1), in dB
+ * (-20..20): what the chosen preset has, or the custom ones. Moving one
+ * makes the equalizer Custom, starting from what was playing. */
+int player_eq_bands();
+float player_eq_band_hz(int band);
+float player_eq_amp(int band);
+void player_set_eq_amp(int band, float db);
 
 /* Sound output: 0 stereo (VLC downmixes surround files), 1 surround (5.1/7.1
  * files go out on 8 channels). From the next file. Remembered. */

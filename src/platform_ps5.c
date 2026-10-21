@@ -36,6 +36,14 @@ int scePadInit(void);
 int scePadOpen(int32_t user_id, int32_t port_type, int32_t index, const void *params);
 int scePadRead(int32_t handle, void *samples, int32_t capacity);
 int scePadClose(int32_t handle);
+/* the classic two-motor rumble: mode 2 ("compatible") first, then the two
+ * motors' strengths (0-255); the other mode is the DualSense's haptics */
+typedef struct {
+    uint8_t large_motor;
+    uint8_t small_motor;
+} PadVibration;
+int scePadSetVibrationMode(int32_t handle, int32_t mode);
+int scePadSetVibration(int32_t handle, const PadVibration *vibration);
 
 int sceUserServiceInitialize(const void *params);
 int sceUserServiceGetInitialUser(int32_t *user_id);
@@ -620,12 +628,31 @@ static void stick(uint8_t bx, uint8_t by, float *x, float *y)
     *y = fy * scale;
 }
 
-/* The console doesn't give titles scePadSetVibration (run 10: unresolved);
- * no rumble until another way is found. */
+/* Rumble: run 10 found scePadSetVibration unresolved; it's only called when
+ * the loader gave it an address, and after the pad's vibration mode is set
+ * (without it the motors stay still). It stops by itself after `ms`
+ * (plat_pad_read). */
+static bool rumble_ok, rumble_on;
+static double rumble_until;
+
+static void rumble_set(uint8_t large, uint8_t small)
+{
+    PadVibration v = { large, small };
+    int rc = scePadSetVibration(pad_handle, &v);
+    static int logged;
+    if (rc != 0 && logged++ < 3)
+        fprintf(stderr, "VLC-PS5: pad vibration %#x\n", (unsigned)rc);
+}
+
 void plat_pad_rumble(float strength, int ms)
 {
-    (void)strength;
-    (void)ms;
+    if (!rumble_ok || pad_handle < 0)
+        return;
+    int v = (int)(strength * 255 + 0.5f);
+    v = v < 0 ? 0 : v > 255 ? 255 : v;
+    rumble_set((uint8_t)v, (uint8_t)v);
+    rumble_on = true;
+    rumble_until = plat_time() + ms / 1000.0;
 }
 
 bool plat_pad_read(PadState *state)
@@ -644,13 +671,25 @@ bool plat_pad_read(PadState *state)
         }
         if (pad_user >= 0 || sceUserServiceGetInitialUser(&pad_user) == 0) {
             pad_handle = scePadOpen(pad_user, 0, 0, NULL);
-            fprintf(stderr, "VLC-PS5: pad user %d, handle %d\n", pad_user, pad_handle);
+            int mode = -1;
+            rumble_ok = false;
+            if (pad_handle >= 0 && import_resolved("scePadSetVibrationMode") &&
+                import_resolved("scePadSetVibration")) {
+                mode = scePadSetVibrationMode(pad_handle, 2);
+                rumble_ok = mode == 0;
+            }
+            fprintf(stderr, "VLC-PS5: pad user %d, handle %d, vibration %s (%#x)\n", pad_user, pad_handle,
+                    rumble_ok ? "on" : "off", (unsigned)mode);
         } else {
             pad_user = -1;
         }
     }
     if (pad_handle < 0)
         return false;
+    if (rumble_on && now >= rumble_until) {
+        rumble_set(0, 0);
+        rumble_on = false;
+    }
     PadSample samples[64];
     int n = scePadRead(pad_handle, samples, 64);
     if (n < 0 || n > 64) {

@@ -48,10 +48,16 @@ namespace {
 /* ---- look ------------------------------------------------------------------- */
 
 const float PI_F = 3.14159265f;
-/* Two looks (Settings > Interface > Look, applied at start): Modern, the black
- * VLC 4 style, and Classic, graphite panels and bevels like a desktop media
- * player of the Windows 7 years, VLC orange as the accent only. */
-bool classic_look;
+/* Three looks (Settings > Interface > Look, applied at start): Modern, the black
+ * VLC 4 style; Classic, graphite panels and bevels like a desktop media player
+ * of the Windows 7 years, VLC orange as the accent only; and Redesign by
+ * Juxtopposed (her "VLC Redesign" Figma design, CC BY 4.0, adapted for the
+ * PS5: PLAN-REDESIGN.txt). Its screens are drawn by src/ui_jux.cc as they're
+ * built; until then a screen draws as Modern in the design's colours. */
+enum { LOOK_MODERN, LOOK_CLASSIC, LOOK_JUX, LOOK_COUNT };
+int look_id;
+bool classic_look, jux_look;
+const char *const look_names[LOOK_COUNT] = { "Modern", "Classic", "Redesign by Juxtopposed" };
 ImU32 C_BG = IM_COL32(11, 11, 15, 255);
 ImU32 C_CARD = IM_COL32(28, 28, 35, 255);
 ImU32 C_CARD_HI = IM_COL32(40, 40, 50, 255);
@@ -61,10 +67,20 @@ ImU32 C_FAINT = IM_COL32(95, 95, 108, 255);
 const ImU32 C_LINE = IM_COL32(62, 66, 74, 255);  /* Classic: panel borders */
 const ImU32 C_SHADE = IM_COL32(8, 9, 11, 255);   /* Classic: the dark edge under a bevel */
 
+void jux_look_colours(); /* (ui_jux_icons.inc) */
+
 void apply_look()
 {
     /* Modern is the default; an install from before the setup was Classic */
-    classic_look = pref_int("look", prefs_existed() ? 1 : 0) == 1;
+    look_id = pref_int("look", prefs_existed() ? LOOK_CLASSIC : LOOK_MODERN);
+    if (look_id < 0 || look_id >= LOOK_COUNT)
+        look_id = LOOK_MODERN;
+    classic_look = look_id == LOOK_CLASSIC;
+    jux_look = look_id == LOOK_JUX;
+    if (jux_look) {
+        jux_look_colours(); /* the design's greys, dark or light */
+        return;
+    }
     if (!classic_look)
         return;
     C_BG = IM_COL32(23, 25, 29, 255);
@@ -93,6 +109,13 @@ std::vector<Theme> themes = {
     { "Gold", IM_COL32(255, 196, 46, 255), IM_COL32(240, 160, 16, 255) },
 };
 const size_t BUILTIN_THEMES = 7;
+/* Redesign by Juxtopposed: the design's nine accent colours (its Settings >
+ * Appearance), VLC orange first */
+const ImU32 jux_accents[9] = {
+    IM_COL32(211, 121, 24, 255), IM_COL32(160, 59, 38, 255),  IM_COL32(140, 114, 27, 255),
+    IM_COL32(20, 116, 40, 255),  IM_COL32(20, 122, 151, 255), IM_COL32(20, 68, 151, 255),
+    IM_COL32(102, 49, 181, 255), IM_COL32(171, 60, 128, 255), IM_COL32(126, 126, 126, 255),
+};
 
 ImU32 parse_colour(const std::string &v, ImU32 fallback)
 {
@@ -107,6 +130,20 @@ ImU32 parse_colour(const std::string &v, ImU32 fallback)
 
 void apply_theme()
 {
+    if (jux_look) {
+        int i = pref_int("jux_accent", 0);
+        if (i < 0 || i >= 9)
+            i = 0;
+        C_ORANGE = jux_accents[i];
+        /* the design's soft tone of it (slider fills, selected segments): dark
+         * on the dark theme, a light peach of it on the light one */
+        ImVec4 c = ImGui::ColorConvertU32ToFloat4(C_ORANGE);
+        if (pref_int("jux_light", 0))
+            C_ORANGE2 = ImGui::ColorConvertFloat4ToU32(ImVec4(c.x + (1 - c.x) * 0.6f, c.y + (1 - c.y) * 0.6f, c.z + (1 - c.z) * 0.6f, 1));
+        else
+            C_ORANGE2 = ImGui::ColorConvertFloat4ToU32(ImVec4(c.x * 0.26f, c.y * 0.26f, c.z * 0.26f, 1));
+        return;
+    }
     if (classic_look) {
         /* Classic: VLC orange only, no themes. */
         C_ORANGE = themes[0].accent;
@@ -137,11 +174,16 @@ float S = 1;     /* pixels per layout unit */
 float dt = 1 / 60.0f;
 double now;
 ImFont *f_reg, *f_semi, *f_bold, *f_mono;
+ImFont *f_time; /* the times (Redesign: DM Mono, as its design) */
 ImDrawList *dl;
+
+/* where layout (0, 0) is, in pixels: Redesign by Juxtopposed draws a tab's
+ * content into part of the screen (jux_content_begin) */
+float OX, OY;
 
 ImVec2 P(float x, float y)
 {
-    return ImVec2(x * S, y * S);
+    return ImVec2(OX + x * S, OY + y * S);
 }
 
 float approach(float cur, float target, float speed)
@@ -304,6 +346,8 @@ void tri(float x0, float y0, float x1, float y1, float x2, float y2, ImU32 col)
 {
     dl->AddTriangleFilled(P(x0, y0), P(x1, y1), P(x2, y2), col);
 }
+
+#include "ui_jux_icons.inc"
 
 /* ---- the Classic look's pieces ---------------------------------------------------- */
 
@@ -608,6 +652,10 @@ void icon_cc(float cx, float cy, float s, ImU32 col)
 
 void icon_film(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_VIDEO, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     stroke(cx - s * 0.5f, cy - s * 0.36f, s, s * 0.72f, col, s * 0.08f, s * 0.07f);
     for (int i = 0; i < 4; i++) {
         float x = cx - s * 0.4f + i * s * 0.27f;
@@ -619,6 +667,10 @@ void icon_film(float cx, float cy, float s, ImU32 col)
 
 void icon_note(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_NOTE, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     circle(cx - s * 0.22f, cy + s * 0.28f, s * 0.16f, col);
     circle(cx + s * 0.28f, cy + s * 0.18f, s * 0.16f, col);
     rect(cx - s * 0.1f, cy - s * 0.4f, s * 0.07f, s * 0.7f, col);
@@ -629,12 +681,20 @@ void icon_note(float cx, float cy, float s, ImU32 col)
 
 void icon_folder(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_FOLDER, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     rect(cx - s * 0.5f, cy - s * 0.38f, s * 0.42f, s * 0.2f, col, s * 0.06f);
     rect(cx - s * 0.5f, cy - s * 0.26f, s, s * 0.64f, col, s * 0.08f);
 }
 
 void icon_gear(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_GEAR, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     for (int i = 0; i < 8; i++) {
         float a = i * PI_F / 4;
         dl->AddLine(P(cx + cosf(a) * s * 0.25f, cy + sinf(a) * s * 0.25f),
@@ -654,6 +714,10 @@ void icon_check(float cx, float cy, float s, ImU32 col)
 
 void icon_picture(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_PICTURE, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     stroke(cx - s * 0.5f, cy - s * 0.34f, s, s * 0.68f, col, s * 0.08f, s * 0.07f);
     tri(cx - s * 0.36f, cy + s * 0.22f, cx - s * 0.08f, cy - s * 0.12f, cx + s * 0.14f, cy + s * 0.22f, col);
     tri(cx + s * 0.02f, cy + s * 0.22f, cx + s * 0.2f, cy, cx + s * 0.38f, cy + s * 0.22f, col);
@@ -696,6 +760,10 @@ void icon_repeat(float cx, float cy, float s, ImU32 col, int mode)
 /* A playlist: lines and a note. */
 void icon_list(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_DOC, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     for (int i = 0; i < 3; i++)
         rect(cx - s * 0.48f, cy - s * 0.36f + i * s * 0.26f, s * (i == 2 ? 0.42f : 0.62f), s * 0.09f, col, s * 0.04f);
     circle(cx + s * 0.28f, cy + s * 0.32f, s * 0.13f, col);
@@ -722,9 +790,16 @@ void cone(float x, float y, float s, float a = 1)
 /* PlayStation button glyph in a dark disc. */
 void glyph(float cx, float cy, float r, uint32_t button, float a = 1)
 {
-    circle(cx, cy, r, alpha(IM_COL32(255, 255, 255, 40), a));
-    ImU32 c = alpha(C_TEXT, a);
-    float s = r * 0.52f;
+    if (jux_look) {
+        /* Redesign: a keycap like the design's controls, a dark rounded
+         * square with a thin edge, the symbol a little lighter */
+        rect(cx - r, cy - r, 2 * r, 2 * r, alpha(J_RAISED, a), r * 0.36f);
+        stroke(cx - r, cy - r, 2 * r, 2 * r, alpha(J_EDGE, a), r * 0.36f, 1.2f);
+    } else {
+        circle(cx, cy, r, alpha(IM_COL32(255, 255, 255, 40), a));
+    }
+    ImU32 c = alpha(jux_look ? mix(J_TEXT, J_DIM, 0.25f) : C_TEXT, a);
+    float s = r * (jux_look ? 0.46f : 0.52f);
     switch (button) {
     case PAD_CROSS:
         line(cx - s, cy - s, cx + s, cy + s, c, r * 0.16f);
@@ -764,15 +839,18 @@ float hints(float right, float y, const std::vector<std::pair<uint32_t, const ch
     for (int i = (int)list.size() - 1; i >= 0; i--) {
         uint32_t b = list[i].first;
         const char *label = list[i].second;
-        float tw = text_size(f_semi, 22, label).x;
+        ImFont *lf = jux_look ? f_reg : f_semi; /* (Redesign: the design's lighter labels) */
+        float tw = text_size(lf, 22, label).x;
         x -= tw;
-        text(f_semi, 22, x, y - 13, alpha(C_DIM, a), label);
+        text(lf, 22, x, y - 13, alpha(C_DIM, a), label);
         x -= 12;
         if (b == PAD_L1 || b == PAD_R1 || b == PAD_L2 || b == PAD_R2 || b == PAD_L3 || b == PAD_R3) {
             const char *n = b == PAD_L1 ? "L1" : b == PAD_R1 ? "R1" : b == PAD_L2 ? "L2"
                           : b == PAD_R2 ? "R2" : b == PAD_L3 ? "L3" : "R3";
             float w = 46;
-            rect(x - w, y - 15, w, 30, alpha(IM_COL32(255, 255, 255, 40), a), 8);
+            rect(x - w, y - 15, w, 30, alpha(jux_look ? J_RAISED : IM_COL32(255, 255, 255, 40), a), jux_look ? 6 : 8);
+            if (jux_look)
+                stroke(x - w, y - 15, w, 30, alpha(J_EDGE, a), 6, 1.2f);
             text(f_bold, 18, x - w / 2, y - 11, alpha(C_TEXT, a), n, 0.5f);
             x -= w;
         } else {
@@ -856,6 +934,13 @@ int video_focus, music_focus, browse_focus;
 float video_scroll, music_scroll, browse_scroll;
 std::string browse_dir; /* "" = the roots */
 
+/* Redesign by Juxtopposed's pieces (ui_jux.inc) */
+void jux_background();
+float jux_in(float x, float y);
+void video_card_jux(float x, float y, float w, int item, float f);
+void list_row_jux(float x, float y, float w, float h, float f, bool even);
+void jux_heading(float x, float y, const char *title, size_t count, float on);
+
 /* Focus animations, keyed by a stable id. */
 struct Anim {
     uint64_t id;
@@ -923,6 +1008,7 @@ int playlist_pos;
 float osd_anim;
 double osd_until;
 int osd_row = 1, osd_col = 2; /* row 0: seek bar; row 1: buttons */
+const int OSD_VOLUME = 10;      /* the volume, a button of the bar (every look) */
 bool scrubbing;
 int64_t scrub_ms;
 double scrub_commit_at;
@@ -973,6 +1059,12 @@ void buzz(float strength, int ms)
 {
     if (pref_int("haptics", 1))
         plat_pad_rumble(strength, ms);
+}
+
+/* a light tick: a tab, a page, a setting moved, the volume */
+void tick()
+{
+    buzz(0.12f, 16);
 }
 bool quit;
 float vid_rect[4];
@@ -1194,6 +1286,8 @@ void restart_playing(int item)
 
 void start_playback(int item, int64_t from_ms, const std::vector<int> &list, bool seamless, bool background)
 {
+    if (!seamless && !background)
+        buzz(0.35f, 45);
     music_bg = background;
     music_started_at = now;
     MediaItem &m = L()[item];
@@ -1378,7 +1472,9 @@ void play_playlist(const std::string &path)
 /* Modern: black, nothing else. Classic: the window's graphite body. */
 void background()
 {
-    if (classic_look)
+    if (jux_look)
+        jux_background();
+    else if (classic_look)
         vgrad(0, 0, 1920, 1080, IM_COL32(29, 31, 36, 255), IM_COL32(18, 19, 23, 255));
     else
         rect(0, 0, 1920, 1080, IM_COL32(0, 0, 0, 255));
@@ -1636,6 +1732,10 @@ void video_card_classic(float x, float y, float w, int item, float f)
 /* A video card at (x, y), w wide (16:9 picture plus two lines of text). */
 void video_card(float x, float y, float w, int item, float f)
 {
+    if (jux_look) {
+        video_card_jux(x, y, w, item, f);
+        return;
+    }
     if (classic_look) {
         video_card_classic(x, y, w, item, f);
         return;
@@ -1705,9 +1805,14 @@ void video_card(float x, float y, float w, int item, float f)
 
 /* Nothing to play: VLC on the PC with no file open. The cone, centred on
  * black, and one quiet line about where files come from. */
+void jux_cone(float cx, float top, float h, ImU32 col);
+
 void empty_state()
 {
-    logo(960, 540, 170);
+    if (jux_look)
+        jux_cone(960, 400, 190, C_ORANGE); /* the design's flat cone */
+    else
+        logo(960, 540, 170);
     text(f_reg, 21, 960, 900, C_FAINT,
          "Plug in a USB drive, or copy files to /data/homebrew/" VLC_PS5_TITLE_ID "/media", 0.5f);
 }
@@ -1885,7 +1990,9 @@ void tab_home()
             continue;
         bool row_on = r == home_row;
         float ra = focus_anim(2000 + r, row_on, 10);
-        if (classic_look) {
+        if (jux_look) {
+            jux_heading(96, y, row.title, row.items.size(), ra);
+        } else if (classic_look) {
             classic_heading(96, y + 8, row.title, row.items.size());
         } else {
             text(f_bold, 30, 96, y, mix(C_DIM, C_TEXT, ra), row.title);
@@ -1894,12 +2001,17 @@ void tab_home()
             text(f_semi, 22, 104 + text_size(f_bold, 30, row.title).x, y + 7, C_FAINT, count);
         }
         int c = home_col[r % 8];
-        float want = c * (card_w + gap);
+        /* Redesign: music is square covers, so its row packs closer */
+        bool covers = jux_look && !row.items.empty();
+        for (int it : row.items)
+            covers = covers && L()[it].audio;
+        float step = covers ? card_w * 9 / 16 + gap : card_w + gap;
+        float want = c * step;
         float visible = 1920 - 96 * 2;
         float scroll_target = std::max(0.0f, want - (visible - card_w) * 0.35f);
         home_col_scroll[r % 8] = approach(home_col_scroll[r % 8], scroll_target, 12);
         for (int i = 0; i < (int)row.items.size(); i++) {
-            float x = 96 + i * (card_w + gap) - home_col_scroll[r % 8];
+            float x = 96 + i * step - home_col_scroll[r % 8];
             if (x > 1920 || x + card_w < -100)
                 continue;
             bool focused = row_on && i == c && modal == NONE;
@@ -1935,7 +2047,9 @@ void tab_videos()
     int frow = video_focus / cols;
     /* Scroll only when the focused row would leave the screen. */
     video_scroll = approach(video_scroll, std::max(0.0f, 206 + (frow + 1) * row_h - 1000), 10);
-    if (classic_look) {
+    if (jux_look) {
+        jux_heading(96, 140, "All videos", (size_t)n, 1);
+    } else if (classic_look) {
         classic_heading(96, 140, "All videos", (size_t)n);
     } else {
         text(f_bold, 30, 96, 140, C_TEXT, "All videos");
@@ -1958,6 +2072,10 @@ void tab_videos()
 /* A focusable list row (Music, Browse, menus). */
 void list_row(float x, float y, float w, float h, float f, bool even)
 {
+    if (jux_look) {
+        list_row_jux(x, y, w, h, f, even);
+        return;
+    }
     if (classic_look) {
         sel_box(x, y, w, h, f);
         return;
@@ -2242,6 +2360,41 @@ void playlist_card(float x, float y, float w, const PlaylistFile *pl, float f)
             text_wrapped(f_reg, 18, x, y + h + 42, C_FAINT, "Then add videos and songs from anywhere with the Options menu", w, 2);
         return;
     }
+    if (jux_look) {
+        /* Redesign: as its video cards (rounded, the accent ring, entering
+         * one after another); "New playlist" an outlined card with a + */
+        float in = jux_in(x, y);
+        if (in <= 0)
+            return;
+        y += (1 - in) * 28;
+        float e = ease(f), grow = 1 + 0.045f * e;
+        float cw = w * grow, ch = h * grow;
+        float cx = x - (cw - w) / 2, cy = y - (ch - h) / 2 - 8 * e;
+        glow(cx, cy + 12, cw, ch, 12, alpha(IM_COL32(0, 0, 0, 255), J_SHADE * in * (0.6f + 0.4f * e)), 20, 6);
+        if (e > 0.01f)
+            glow(cx, cy, cw, ch, 12, alpha(C_ORANGE, 0.45f * e * in), 16, 6);
+        if (pl) {
+            playlist_cover(pl->path, cx, cy, cw, ch, 12);
+            std::string count = std::to_string(playlist_count_cached(pl->path));
+            float tw = text_size(f_semi, 18, count.c_str()).x;
+            rect(cx + cw - tw - 50, cy + ch - 38, tw + 40, 26, alpha(IM_COL32(0, 0, 0, 190), in), 6);
+            icon_list(cx + cw - tw - 34, cy + ch - 25, 16, alpha(IM_COL32(240, 240, 240, 255), in));
+            text(f_semi, 18, cx + cw - tw - 17, cy + ch - 35, alpha(IM_COL32(240, 240, 240, 255), in), count.c_str());
+        } else {
+            rect(cx, cy, cw, ch, alpha(J_PANEL, in), 12);
+            stroke(cx, cy, cw, ch, alpha(mix(J_LINE, C_ORANGE, e), in), 12, 1.5f);
+            jux_icon(JI_PLUS, cx + cw / 2, cy + ch / 2, ch * 0.3f, alpha(mix(J_DIM, C_ORANGE, e), in));
+        }
+        if (e > 0.01f)
+            stroke(cx - 3, cy - 3, cw + 6, ch + 6, alpha(C_ORANGE, e * in), 14, 3);
+        text(f_reg, 22, x, y + h + 18 + 2 * e, alpha(mix(J_DIM, J_TEXT, e), in), name, 0, w);
+        if (pl)
+            text(f_reg, 18, x, y + h + 48 + 2 * e, alpha(J_FAINT, in), sub.c_str(), 0, w);
+        else
+            text_wrapped(f_reg, 18, x, y + h + 48 + 2 * e, alpha(J_FAINT, in),
+                         "Then add videos and songs from anywhere with the Options menu", w, 2);
+        return;
+    }
     float grow = 1 + 0.07f * ease(f);
     float cw = w * grow, ch = h * grow;
     float cx = x - (cw - w) / 2, cy = y - (ch - h) / 2 - 6 * f;
@@ -2489,6 +2642,10 @@ void spinner(float cx, float cy, float r);
 
 void icon_server(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_NETWORK, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     for (int i = 0; i < 2; i++) {
         float y = cy - s * 0.42f + i * s * 0.46f;
         stroke(cx - s * 0.5f, y, s, s * 0.38f, col, s * 0.08f, 2.5f);
@@ -2499,6 +2656,10 @@ void icon_server(float cx, float cy, float s, ImU32 col)
 
 void icon_tv(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_TV, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     stroke(cx - s * 0.5f, cy - s * 0.36f, s, s * 0.62f, col, s * 0.08f, 2.5f);
     line(cx - s * 0.2f, cy + s * 0.42f, cx + s * 0.2f, cy + s * 0.42f, col, 2.5f);
     line(cx - s * 0.16f, cy - s * 0.5f, cx, cy - s * 0.38f, col, 2.5f);
@@ -2507,6 +2668,10 @@ void icon_tv(float cx, float cy, float s, ImU32 col)
 
 void icon_radio(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_RADIO, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     circle(cx, cy, s * 0.1f, col);
     for (int i = 1; i <= 2; i++) {
         float r = s * (0.2f + 0.16f * i);
@@ -2519,6 +2684,10 @@ void icon_radio(float cx, float cy, float s, ImU32 col)
 
 void icon_plus_circle(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_PLUS, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     dl->AddCircle(P(cx, cy), s * 0.5f * S, col, 32, 2.5f * S);
     line(cx - s * 0.24f, cy, cx + s * 0.24f, cy, col, 2.5f);
     line(cx, cy - s * 0.24f, cx, cy + s * 0.24f, col, 2.5f);
@@ -2919,10 +3088,16 @@ void music_tick()
     }
 }
 
+void jux_mini_player();
+
 void mini_player()
 {
     if (!music_bg)
         return;
+    if (jux_look) {
+        jux_mini_player();
+        return;
+    }
     MediaItem *m = library_find(playing_path);
     float x = 96, y = classic_look ? 940 : 948, w = 760, h = 56;
     if (classic_look) {
@@ -3222,6 +3397,8 @@ void vgrad(float x, float y, float w, float h, ImU32 top, ImU32 bottom);
 void bevel(float x, float y, float w, float h, ImU32 top, ImU32 bottom);
 void cone(float x, float y, float s, float a);
 
+#include "ui_jux.inc"
+
 void screen_backdrop(float a)
 {
     if (classic_look) {
@@ -3232,7 +3409,9 @@ void screen_backdrop(float a)
         cone(96, 31, 46, a);
         bevel(0, 1004, 1920, 76, alpha(IM_COL32(44, 48, 55, 255), a), alpha(IM_COL32(26, 28, 33, 255), a));
         rect(0, 1004, 1920, 1, alpha(IM_COL32(70, 75, 84, 255), a));
-    } else
+    } else if (jux_look)
+        rect(0, 0, 1920, 1080, alpha(J_BG, a));
+    else
         rect(0, 0, 1920, 1080, alpha(IM_COL32(6, 6, 9, 255), a));
 }
 
@@ -3254,6 +3433,13 @@ void panel(float x, float y, float w, float h, float a)
         stroke(x + 1.5f, y + 1.5f, w - 3, h - 3, alpha(IM_COL32(255, 255, 255, 24), a), 3, 1);
         return;
     }
+    if (jux_look) {
+        /* Redesign: the design's dark rounded window with a thin edge */
+        glow(x, y + 14, w, h, 16, alpha(IM_COL32(0, 0, 0, 255), J_SHADE * a), 30, 6);
+        rect(x, y, w, h, alpha(J_POP, a), 16);
+        stroke(x, y, w, h, alpha(J_LINE, a), 16, 1.5f);
+        return;
+    }
     glow(x, y + 16, w, h, 24, alpha(IM_COL32(0, 0, 0, 255), a), 40);
     rect(x, y, w, h, alpha(IM_COL32(24, 24, 31, 250), a), 24);
     stroke(x, y, w, h, alpha(IM_COL32(255, 255, 255, 22), a), 24, 1.5f);
@@ -3261,7 +3447,7 @@ void panel(float x, float y, float w, float h, float a)
 
 void dim_screen(float a)
 {
-    rect(0, 0, 1920, 1080, alpha(IM_COL32(0, 0, 0, 160), a));
+    rect(0, 0, 1920, 1080, alpha(IM_COL32(0, 0, 0, jux_look ? 185 : 160), a));
 }
 
 /* A centred menu of buttons; returns the chosen index on ✕, -2 on ○, -1 otherwise. */
@@ -3387,7 +3573,8 @@ bool kb_frame(float x, float y, float w, bool focused, float a, bool *leave_up)
     if (const char *typed = plat_take_typed())
         kb.text += typed;
 #endif
-    const float gap = 10, kh = 62;
+    /* (Redesign: smaller keys, the keyboard sits in the search popup) */
+    const float gap = jux_look ? 8 : 10, kh = jux_look ? 48 : 62;
     float kw = (w - 9 * gap) / 10;
     std::vector<int> bottom = kb_bottom();
     float total_weight = 0;
@@ -3470,6 +3657,10 @@ bool kb_frame(float x, float y, float w, bool focused, float a, bool *leave_up)
                 rect(kx + 2, ky + 1, wdt - 4, 1, alpha(IM_COL32(255, 255, 255, 30), a));
                 sel_box(kx, ky, wdt, kh, f * a);
                 tc = alpha(C_TEXT, a);
+            } else if (jux_look) {
+                rect(kx, ky, wdt, kh, alpha(mix(special ? J_RAISED : J_CTRL, C_ORANGE2, f), a), 8);
+                stroke(kx, ky, wdt, kh, alpha(mix(J_LINE, C_ORANGE, f), a), 8, 1.2f + f);
+                tc = alpha(mix(J_TEXT, C_ORANGE, f), a);
             } else {
                 ImU32 fill = mix(special ? IM_COL32(48, 48, 60, 255) : IM_COL32(36, 36, 46, 255), C_ORANGE, f);
                 rect(kx, ky, wdt, kh, alpha(fill, a), 12);
@@ -3478,7 +3669,8 @@ bool kb_frame(float x, float y, float w, bool focused, float a, bool *leave_up)
             float cx = kx + wdt / 2, cy = ky + kh / 2;
             if (r < 4) {
                 char ch[2] = { kb_rows[kb.layer][r][c], 0 };
-                text(f_semi, 28, cx, ky + 14, tc, ch, 0.5f);
+                float ks = jux_look ? 23 : 28;
+                text(f_semi, ks, cx, ky + (kh - ks * 1.2f) / 2, tc, ch, 0.5f);
             } else {
                 const char *label = "";
                 switch (bottom[c]) {
@@ -3493,7 +3685,7 @@ bool kb_frame(float x, float y, float w, bool focused, float a, bool *leave_up)
                 }
                 if (bottom[c] == KB_BACK) {
                     /* ⌫ drawn: a tag pointing left with an x */
-                    float s2 = 20;
+                    float s2 = jux_look ? 15 : 20;
                     dl->PathLineTo(P(cx - s2, cy));
                     dl->PathLineTo(P(cx - s2 * 0.4f, cy - s2 * 0.6f));
                     dl->PathLineTo(P(cx + s2, cy - s2 * 0.6f));
@@ -3503,7 +3695,8 @@ bool kb_frame(float x, float y, float w, bool focused, float a, bool *leave_up)
                     line(cx - 2, cy - 6, cx + 10, cy + 6, tc, 2.5f);
                     line(cx - 2, cy + 6, cx + 10, cy - 6, tc, 2.5f);
                 } else {
-                    text(f_semi, 22, cx, ky + 18, tc, label, 0.5f);
+                    float ls = jux_look ? 19 : 22;
+                    text(f_semi, ls, cx, ky + (kh - ls * 1.2f) / 2, tc, label, 0.5f);
                 }
             }
             kx += wdt + gap;
@@ -3519,6 +3712,9 @@ void text_box(float x, float y, float w, const char *placeholder, float a, bool 
         inset(x, y, w, 72);
         if (focused)
             stroke(x, y, w, 72, alpha(C_ORANGE, 0.8f * a), 3, 1.5f);
+    } else if (jux_look) {
+        rect(x, y, w, 72, alpha(J_BAR, a), 10);
+        stroke(x, y, w, 72, alpha(focused ? C_ORANGE : J_LINE, a), 10, 1.5f);
     } else {
         rect(x, y, w, 72, alpha(IM_COL32(30, 30, 40, 255), a), 16);
         stroke(x, y, w, 72, alpha(focused ? C_ORANGE : IM_COL32(255, 255, 255, 30), a), 16, 2);
@@ -3752,6 +3948,7 @@ void start_stream(const std::string &url, const std::vector<std::string> &option
 
 void open_search(const std::string &text)
 {
+    tick();
     kb_open(text, false);
     found_for = "\x01";
     in_list = false;
@@ -4026,6 +4223,9 @@ void field_box(float x, float y, float w, const char *label, const std::string &
         inset(x, y + 32, w, 66);
         if (active)
             stroke(x, y + 32, w, 66, alpha(C_ORANGE, 0.8f * a), 3, 1.5f);
+    } else if (jux_look) {
+        rect(x, y + 32, w, 66, alpha(J_BAR, a), 10);
+        stroke(x, y + 32, w, 66, alpha(active ? C_ORANGE : J_LINE, a), 10, 1.5f);
     } else {
         rect(x, y + 32, w, 66, alpha(IM_COL32(30, 30, 40, 255), a), 14);
         stroke(x, y + 32, w, 66, alpha(active ? C_ORANGE : IM_COL32(255, 255, 255, 30), a), 14, 2);
@@ -4509,14 +4709,52 @@ void modal_text_screen()
     if (found_focus >= n)
         found_focus = n ? n - 1 : 0;
     float a = ease(modal_anim);
-    screen_backdrop(a); /* its own screen */
-    const float x = 260, w = 1400;
-    text(f_bold, 36, x, classic_look ? 32 : 64, alpha(C_TEXT, a), search ? "Search" : "Open a network link");
-    text_box(x, 128, w, search ? "Type a title or a folder" : "http://, udp://, rtp://, ftp:// ...", a, !in_list);
+    float x = 260, w = 1400, field_y = 128, list_top = 230, kb_y = 640, hint_x = 1824, hint_y = 1040;
+    float list_clip = 1080; /* (Redesign: the results stay above the keyboard while the panel grows) */
+    const float row_h = 62;
+    int shown = 6;
+    if (jux_look) {
+        /* Redesign: not a screen of its own but a panel that grows out of the
+         * top bar's search field: the field stretches to the left, then the
+         * panel drops down under it; what's inside fades in last. */
+        static double opened_at;
+        static Modal opened_as = NONE;
+        if (opened_as != modal || a < 0.05f) {
+            opened_as = modal;
+            opened_at = now;
+        }
+        float t = (float)(now - opened_at);
+        float kw = ease(t / 0.28f), kh = ease((t - 0.12f) / 0.38f), kc = ease((t - 0.3f) / 0.3f);
+        /* as tall as its results need (one line at first, up to five), and it
+         * grows smoothly as they come */
+        static float rows_anim = 1;
+        rows_anim = approach(rows_anim, (float)std::max(1, std::min(n, 5)), 10);
+        const float right = 1896, top = 34, full_w = 1000;
+        float full_h = 20 + 96 + rows_anim * row_h + 24 + 272 + 72;
+        float pw = 360 + (full_w - 360) * kw, ph = 58 + (full_h - 58) * kh;
+        float px = right - pw;
+        rect(0, 0, 1920, 1080, alpha(IM_COL32(0, 0, 0, 150), a * kh));
+        glow(px, top + 14, pw, ph, 16, alpha(IM_COL32(0, 0, 0, 255), J_SHADE * a), 30, 6);
+        rect(px, top, pw, ph, alpha(J_POP, a), 16);
+        stroke(px, top, pw, ph, alpha(mix(J_LINE, C_ORANGE, 0.5f * (1 - kh)), a), 16, 1.5f);
+        a *= kc;
+        x = px + 28;
+        w = pw - 56;
+        field_y = top + 20;
+        list_top = field_y + 96;
+        kb_y = top + ph - 344;
+        hint_x = right - 28;
+        hint_y = top + ph - 34;
+        shown = 5;
+        list_clip = list_top + rows_anim * row_h + 4;
+        rect(px + 20, list_top + rows_anim * row_h + 8, pw - 40, 1, alpha(J_LINE, a));
+    } else {
+        screen_backdrop(a); /* its own screen */
+        text(f_bold, 36, x, classic_look ? 32 : 64, alpha(C_TEXT, a), search ? "Search" : "Open a network link");
+    }
+    text_box(x, field_y, w, search ? "Type a title or a folder" : "http://, udp://, rtp://, ftp:// ...", a, !in_list);
 
     /* The list: results, or recent links. */
-    const float list_top = 230, row_h = 62;
-    int shown = 6;
     if (in_list) {
         if (hit(PAD_UP) && found_focus > 0)
             found_focus--;
@@ -4537,6 +4775,7 @@ void modal_text_screen()
                                    : "Links you open show up here";
         text(f_reg, 22, x + 4, list_top + 18, alpha(C_FAINT, a), empty);
     }
+    dl->PushClipRect(P(0, 0), P(1920, list_clip), true);
     for (int i = first; i < n && i < first + shown; i++) {
         float ry = list_top + (i - first) * row_h;
         bool foc = in_list && i == found_focus;
@@ -4604,8 +4843,9 @@ void modal_text_screen()
         text(f_reg, 18, x + 64, ry + 32, alpha(C_FAINT, a), sub.c_str(), 0, w - 120);
     }
 
+    dl->PopClipRect();
     bool leave_up = false;
-    bool done = kb_frame(x, 640, w, !in_list, a, &leave_up);
+    bool done = kb_frame(x, kb_y, w, !in_list, a, &leave_up);
     if (leave_up && n > 0) {
         in_list = true;
         found_focus = std::min(n - 1, first + shown - 1);
@@ -4686,10 +4926,10 @@ void modal_text_screen()
         }
     }
     if (in_list)
-        hints(1824, 1040, search ? std::vector<std::pair<uint32_t, const char *>>{ { PAD_CROSS, "Play" }, { PAD_CIRCLE, "Keyboard" } }
-                                 : std::vector<std::pair<uint32_t, const char *>>{ { PAD_CROSS, "Open" }, { PAD_SQUARE, "Forget" }, { PAD_CIRCLE, "Keyboard" } }, a);
+        hints(hint_x, hint_y, search ? std::vector<std::pair<uint32_t, const char *>>{ { PAD_CROSS, "Play" }, { PAD_CIRCLE, "Keyboard" } }
+                                     : std::vector<std::pair<uint32_t, const char *>>{ { PAD_CROSS, "Open" }, { PAD_SQUARE, "Forget" }, { PAD_CIRCLE, "Keyboard" } }, a);
     else
-        hints(1824, 1040, { { PAD_SQUARE, "Delete" }, { PAD_TRIANGLE, "Space" }, { PAD_R2, search ? "Results" : "Open" }, { PAD_CIRCLE, "Close" } }, a);
+        hints(hint_x, hint_y, { { PAD_SQUARE, "Delete" }, { PAD_TRIANGLE, "Space" }, { PAD_R2, search ? "Results" : "Open" }, { PAD_CIRCLE, "Close" } }, a);
 }
 
 /* What the info window returns to when closed (Settings opens About). */
@@ -4740,7 +4980,8 @@ void modal_about()
                  std::string("FFmpeg 8.1.2, dav1d 1.5.4, libmatroska 1.7.2, libebml 1.4.6, libdvbpsi 1.3.3, libass 0.17.5, "
                  "FreeType 2.13.3, HarfBuzz 10.4.0, FriBidi 1.0.16, GnuTLS 3.8.13, Nettle 3.10.2, GMP 6.3.0, "
                  "libsmb2 6.1, libupnp 1.14.31, libxml2 2.15.3, libdvdread 6.1.3, libdvdnav 6.1.1, libbluray 1.4.1, "
-                 "libarchive 3.8.9, zlib 1.3.1, Mesa RADV (Vulkan), Dear ImGui 1.92.9, stb_image, AMD FidelityFX FSR 1 (MIT), FSRCNNX by igv (LGPL-3.0), Anime4K by bloc97 (MIT). ") +
+                 "libarchive 3.8.9, zlib 1.3.1, Mesa RADV (Vulkan), Dear ImGui 1.92.9, stb_image, AMD FidelityFX FSR 1 (MIT), FSRCNNX by igv (LGPL-3.0), Anime4K by bloc97 (MIT). "
+                 "The Redesign look: \"VLC Redesign\" by Juxtopposed (CC BY 4.0), adapted for the PS5; DM Mono font (OFL). ") +
                      tr("Fonts: Selawik, Inter, Noto, DejaVu (OFL). TV lists: iptv-org. Radio: radio-browser.info. Subtitles: OpenSubtitles.com."),
                  tw, 6);
     text(f_reg, 17, tx, y + h - 52, alpha(C_FAINT, a),
@@ -4760,12 +5001,20 @@ enum { OI_SETTINGS, OI_RESCAN, OI_RESUME, OI_TRACKS, OI_STOP, OI_PHONE, OI_SEARC
 
 void icon_search(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_SEARCH, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     ring(cx - s * 0.08f, cy - s * 0.08f, s * 0.3f, col, s * 0.09f);
     line(cx + s * 0.14f, cy + s * 0.14f, cx + s * 0.42f, cy + s * 0.42f, col, s * 0.11f);
 }
 
 void icon_link(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_LINK, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     /* two links of a chain */
     float t = s * 0.08f;
     stroke(cx - s * 0.48f, cy - s * 0.14f, s * 0.54f, s * 0.28f, col, s * 0.14f, t);
@@ -4774,6 +5023,10 @@ void icon_link(float cx, float cy, float s, ImU32 col)
 
 void icon_phone(float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        jux_icon(JI_PHONE, cx, cy, s, col); /* (the design's outline style) */
+        return;
+    }
     stroke(cx - s * 0.26f, cy - s * 0.46f, s * 0.52f, s * 0.92f, col, s * 0.1f, s * 0.08f);
     rect(cx - s * 0.08f, cy + s * 0.3f, s * 0.16f, s * 0.05f, col, s * 0.02f);
     /* waves: it talks to the console */
@@ -4783,6 +5036,22 @@ void icon_phone(float cx, float cy, float s, ImU32 col)
 
 void option_icon(int icon, float cx, float cy, float s, ImU32 col)
 {
+    if (jux_look) {
+        /* the design's menu icons: outlines in the accent */
+        switch (icon) {
+        case OI_SETTINGS: jux_icon(JI_GEAR, cx, cy, s, col); return;
+        case OI_RESCAN: jux_icon(JI_REFRESH, cx, cy, s, col); return;
+        case OI_RESUME: jux_icon(JI_PLAY, cx, cy, s * 0.8f, col); return;
+        case OI_TRACKS: icon_cc(cx, cy, s * 0.9f, col); return;
+        case OI_STOP: jux_icon(JI_STOP, cx, cy, s, col); return;
+        case OI_PHONE: jux_icon(JI_PHONE, cx, cy, s, col); return;
+        case OI_SEARCH: jux_icon(JI_SEARCH, cx, cy, s, col); return;
+        case OI_LINK: jux_icon(JI_LINK, cx, cy, s, col); return;
+        case OI_ADD_PL: jux_icon(JI_PLAYLIST_ADD, cx, cy, s, col); return;
+        case OI_RENAME_PL: jux_icon(JI_PENCIL, cx, cy, s, col); return;
+        default: jux_icon(JI_TRASH, cx, cy, s, col); return;
+        }
+    }
     switch (icon) {
     case OI_SETTINGS: icon_gear(cx, cy, s * 0.8f, col); break;
     case OI_RESCAN: icon_jump(cx, cy, s * 0.95f, col, true, ""); break;
@@ -4845,6 +5114,47 @@ void modal_options()
     }
 
     float a = ease(modal_anim);
+    if (jux_look) {
+        /* the design's right-click menu: a dark rounded list, accent outline
+         * icons, ">" on the ones that open more, thin lines between groups.
+         * In the library it rises from the sidebar's Options; in the player,
+         * in the middle. Its rows come one after another. */
+        static double opened_at;
+        if (a < 0.05f)
+            opened_at = now;
+        dim_screen(a * 0.8f);
+        const float w = 560, row = 76;
+        int lines = 0;
+        for (int i = 1; i < n; i++)
+            if (items[i].icon == OI_SETTINGS || items[i].icon == OI_STOP)
+                lines++;
+        float h = n * row + lines * 17 + 24;
+        float x = in_player ? 960 - w / 2 : 36, y = in_player ? 540 - h / 2 : 1080 - 104 - h;
+        y += (1 - a) * 30;
+        glow(x, y + 12, w, h, 14, alpha(IM_COL32(0, 0, 0, 255), J_SHADE * a), 26, 6);
+        rect(x, y, w, h, alpha(J_POP, a), 14);
+        stroke(x, y, w, h, alpha(J_LINE, a), 14, 1.2f);
+        float ry = y + 12;
+        for (int i = 0; i < n; i++) {
+            if (i > 0 && (items[i].icon == OI_SETTINGS || items[i].icon == OI_STOP)) {
+                rect(x + 12, ry + 8, w - 24, 1, alpha(J_LINE, a));
+                ry += 17;
+            }
+            float k = a * ease(((float)(now - opened_at) - 0.035f * i) / 0.3f);
+            float f = ease(focus_anim(hash_id(items[i].label, 941), i == modal_focus, 14));
+            float dx = (1 - k) * 16;
+            if (f > 0.01f) {
+                rect(x + 8, ry, w - 16, row - 6, alpha(J_RAISED, f * k), 10);
+                rect(x + 8, ry + 18, 4, row - 42, alpha(C_ORANGE, f * k), 2);
+            }
+            option_icon(items[i].icon, x + 52 + dx, ry + (row - 6) / 2, 30, alpha(C_ORANGE, k));
+            text(f_reg, 25, x + 96 + dx, ry + (row - 6) / 2 - 15, alpha(mix(J_DIM, J_TEXT, 0.4f + 0.6f * f), k),
+                 items[i].label, 0, w - 170);
+            if (items[i].icon == OI_SETTINGS || items[i].icon == OI_TRACKS)
+                icon_chevron(x + w - 40, ry + (row - 6) / 2, 16, alpha(mix(J_FAINT, J_TEXT, f), k), false);
+            ry += row;
+        }
+    } else {
     dim_screen(a);
     const float w = 560, row = 84;
     float h = 112 + n * row + 4;
@@ -4865,6 +5175,7 @@ void modal_options()
         option_icon(items[i].icon, x + 62, ry + 36, 30,
                     alpha(f > 0.5f ? IM_COL32(255, 255, 255, 255) : C_DIM, a));
         text(f_semi, 25, x + 108, ry + 21, alpha(mix(C_DIM, C_TEXT, 0.55f + 0.45f * f), a), items[i].label);
+    }
     }
     if (chosen < 0)
         return;
@@ -4938,20 +5249,21 @@ void modal_info()
 }
 
 void setup_begin(bool with_logo);
+void setup_look_choice();
 
 /* ---- Settings: rows of label and value, ←/→ change, ✕ acts ---------------- */
 
 enum {
     ST_DECODING, ST_ALANG, ST_SLANG, ST_SOUND, ST_NIGHT, ST_SPEAKERS, ST_THEME, ST_HAPTICS,
     ST_SWIPES, ST_REPEAT, ST_SHUFFLE, ST_DEBUG, ST_STORAGE, ST_VERSION, ST_RELOAD, ST_ABOUT,
-    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_UPSCALE, ST_COUNT
+    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_UPSCALE, ST_JUXTHEME, ST_COUNT
 };
 const char *const st_labels[ST_COUNT] = {
     "Decoding", "Audio language", "Subtitle language", "Sound output", "Night mode",
     "Speaker test", "Theme", "Controller vibration", "Touchpad swipes", "Repeat the list", "Shuffle",
     "Detailed log", "Storage", "Version", "Reload drives", "About VLC", "Phone access", "Look",
     "Subtitle downloads", "Language", "Run setup again", "Blu-ray region", "Hardware decoding",
-    "Match frame rate", "Upscaling",
+    "Match frame rate", "Upscaling", "Theme",
 };
 /* One line under the focused setting: what it does. */
 const char *const st_help[ST_COUNT] = {
@@ -4980,6 +5292,7 @@ const char *const st_help[ST_COUNT] = {
     "The console's video chip. Off: the processor decodes, slower for 4K",
     "Films play at their own 24, 25 or 50 Hz: smoother pans. Some TVs go black a moment",
     "Enlarges smaller videos. FSRCNNX: films. Anime4K: anime",
+    "Dark or light, as the design has both",
 };
 
 /* Categories: an icon, a name, and their settings. */
@@ -4993,7 +5306,7 @@ const SettingsCat settings_cats[] = {
     { "Playback", SI_PLAY, { ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION } },
     { "Video", SI_VIDEO, { ST_HWDEC, ST_UPSCALE, ST_MATCH, ST_DECODING } },
     { "Sound", SI_SOUND, { ST_SOUND, ST_NIGHT, ST_SPEAKERS } },
-    { "Interface", SI_THEME, { ST_UILANG, ST_LOOK, ST_THEME, ST_SWIPES } },
+    { "Interface", SI_THEME, { ST_UILANG, ST_LOOK, ST_JUXTHEME, ST_THEME, ST_HAPTICS, ST_SWIPES } },
     { "Playlists", SI_LIST, { ST_REPEAT, ST_SHUFFLE } },
     /* (no "Log details" row: the detailed log is for test builds, settings.txt debug=1) */
     { "System", SI_GEAR, { ST_WEB, ST_STORAGE, ST_RELOAD, ST_SETUP, ST_ABOUT } },
@@ -5131,6 +5444,7 @@ void setting_icon(int id, float cx, float cy, float s, ImU32 col)
         rect(cx - s * 0.3f, cy - s * 0.06f, s * 0.22f, s * 0.3f, col);
         break;
     case ST_HAPTICS: si_pad(cx, cy, s, col); break;
+    case ST_JUXTHEME: si_moon(cx, cy, s, col); break;
     case ST_SWIPES: si_touch(cx, cy, s, col); break;
     case ST_REPEAT: icon_repeat(cx, cy, s, col, 0); break;
     case ST_SHUFFLE: si_shuffle(cx, cy, s, col); break;
@@ -5173,10 +5487,13 @@ std::string st_value(int id)
     case ST_NIGHT: return player_night_mode() ? "On" : "Off";
     case ST_SPEAKERS: return "";
     case ST_THEME: {
+        if (jux_look)
+            return ""; /* (Redesign shows the colours themselves) */
         int i = pref_int("theme", 0);
         return i >= 0 && i < (int)themes.size() ? themes[i].name : themes[0].name;
     }
     case ST_HAPTICS: return pref_int("haptics", 1) ? "On" : "Off";
+    case ST_JUXTHEME: return pref_int("jux_light", 0) ? "Light" : "Dark";
     case ST_SWIPES: return pref_int("swipes", 1) ? "On" : "Off";
     case ST_REPEAT: return repeat_list_on() ? "On" : "Off";
     case ST_SHUFFLE: return pref_int("shuffle", 0) ? "On" : "Off";
@@ -5184,7 +5501,7 @@ std::string st_value(int id)
     case ST_STORAGE: return plat_full_access() ? "Full access" : "App folder and drives";
     case ST_VERSION: return VLC_PS5_VERSION;
     case ST_RELOAD: return "Restart";
-    case ST_LOOK: return classic_look ? "Classic" : "Modern";
+    case ST_LOOK: return look_names[look_id];
     case ST_UILANG: return lang_native_name(lang_current());
     case ST_OSUB: {
         if (pref_str("osub_key", "").empty())
@@ -5201,6 +5518,7 @@ std::string st_value(int id)
 
 void st_change(int id, int step)
 {
+    tick();
     int dir = step < 0 ? -1 : 1;
     switch (id) {
     case ST_DECODING:
@@ -5239,11 +5557,23 @@ void st_change(int id, int step)
         }
         break;
     case ST_THEME: {
+        if (jux_look) {
+            /* the design's nine accent colours */
+            pref_set("jux_accent", (pref_int("jux_accent", 0) + 9 + dir) % 9);
+            apply_theme();
+            break;
+        }
         int n = (int)themes.size(), i = pref_int("theme", 0);
         pref_set("theme", (i + n + dir) % n);
         apply_theme();
         break;
     }
+    case ST_JUXTHEME:
+        /* dark or light, at once */
+        pref_set("jux_light", !pref_int("jux_light", 0));
+        apply_look();
+        apply_theme();
+        break;
     case ST_HAPTICS:
         pref_set("haptics", !pref_int("haptics", 1));
         buzz(0.6f, 80);
@@ -5262,10 +5592,10 @@ void st_change(int id, int step)
         pref_set("web", web_running());
         break;
     case ST_LOOK:
-        /* The whole interface is built for one look: VLC starts again in the other. */
-        pref_set("look", classic_look ? 0 : 1);
+        /* The whole interface is built for one look: VLC starts again in the next. */
+        pref_set("look", (look_id + LOOK_COUNT + dir) % LOOK_COUNT);
         plat_restart();
-        pref_set("look", classic_look ? 1 : 0);
+        pref_set("look", look_id);
         toast("Couldn't restart: close VLC and open it again to change the look", 4);
         break;
     case ST_OSUB:
@@ -5300,12 +5630,16 @@ void st_change(int id, int step)
     }
 }
 
+#include "ui_jux_settings.inc"
+
 void modal_settings()
 {
     /* Classic has VLC orange only: no Theme row. */
     SettingsCat cat = settings_cats[settings_cat];
     if (classic_look)
         cat.rows.erase(std::remove(cat.rows.begin(), cat.rows.end(), (int)ST_THEME), cat.rows.end());
+    if (!jux_look) /* (dark or light: Redesign's own) */
+        cat.rows.erase(std::remove(cat.rows.begin(), cat.rows.end(), (int)ST_JUXTHEME), cat.rows.end());
     int rows = (int)cat.rows.size();
     if (!settings_inside) {
         if (hit(PAD_UP) && settings_cat > 0)
@@ -5344,6 +5678,10 @@ void modal_settings()
     }
 
     float a = ease(modal_anim);
+    if (jux_look) {
+        jux_settings_draw(cat, a);
+        return;
+    }
     dim_screen(a);
     const float w = 1260, h = 760, rail = 360;
     float x = 960 - w / 2, y = 540 - h / 2 + (1 - a) * 40;
@@ -5828,7 +6166,8 @@ void modal_resume()
 /* The Tracks panel: slides in from the right in the player. */
 struct PanelEntry {
     int kind; /* 0 header, 1 audio, 2 subtitle, 3 speed, 4 aspect, 5 volume, 6 subtitle file,
-               * 7 setting (←/→ changes, ✕ resets or acts), 8 chapter */
+               * 7 setting (←/→ changes, ✕ resets or acts), 8 chapter, 9 bookmark,
+               * 10 equalizer band (value: the band, -1 the preamp) */
     int value; /* kinds 1-4, 8: what it picks; kind 7: which setting */
     std::string label;
     bool active;
@@ -5929,6 +6268,7 @@ std::string setting_value(int id)
 /* ←/→ (step -1/+1) or ✕ (step 0) on a settings row. */
 void setting_change(int id, int step)
 {
+    tick();
     SubStyle st = player_sub_style();
     PictureAdjust pa = player_picture();
     auto clamp = [](int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; };
@@ -5957,6 +6297,8 @@ void setting_change(int id, int step)
         break;
     case SET_EQ: {
         int n = player_eq_presets(), e = player_eq();
+        if (e == EQ_CUSTOM) /* from Custom: on to the presets, from Off */
+            e = -1;
         player_set_eq(step ? (e + 1 + step + n + 1) % (n + 1) - 1 : -1);
         break;
     }
@@ -6075,8 +6417,25 @@ std::vector<std::string> subtitle_files()
     return out;
 }
 
+#include "ui_jux_player.inc"
+
 void modal_tracks()
 {
+    /* Redesign: one tab at a time (Triangle opens on Audio), L1 / R1 change it */
+    if (jux_look) {
+        if (panel_section == SEC_ALL)
+            panel_section = SEC_AUDIO;
+        static const int order[4] = { SEC_SPEED, SEC_PICTURE, SEC_AUDIO, SEC_SUBS };
+        int at = 0;
+        for (int i = 0; i < 4; i++)
+            if (order[i] == panel_section)
+                at = i;
+        if (hit(PAD_L1) || hit(PAD_R1)) {
+            tick();
+            panel_section = order[(at + (hit(PAD_R1) ? 1 : 3)) % 4];
+            modal_focus = 0;
+        }
+    }
     bool all = panel_section == SEC_ALL;
     std::vector<PanelEntry> e;
     if (all || panel_section == SEC_AUDIO) {
@@ -6086,6 +6445,19 @@ void modal_tracks()
         e.push_back({ 5, 0, vol, false, "" });
         e.push_back({ 7, SET_AUDIO_DELAY, "Audio delay", false, "" });
         e.push_back({ 7, SET_EQ, "Equalizer", false, "" });
+        /* its bands, when it's on: the preamp, then 60 Hz .. 16 kHz */
+        if (player_eq() != -1) {
+            e.push_back({ 10, -1, "Preamp", false, "" });
+            for (int b = 0; b < player_eq_bands(); b++) {
+                float hz = player_eq_band_hz(b);
+                char name[32];
+                if (hz >= 1000)
+                    snprintf(name, sizeof(name), "%g kHz", hz / 1000);
+                else
+                    snprintf(name, sizeof(name), "%g Hz", hz);
+                e.push_back({ 10, b, name, false, "" });
+            }
+        }
         e.push_back({ 7, SET_NIGHT, "Night mode", false, "" });
         e.push_back({ 7, SET_SOUND_OUT, "Sound output", false, "" });
         int at = player_audio_track();
@@ -6162,6 +6534,8 @@ void modal_tracks()
         e.push_back({ 7, SET_PIC_RESET, "Reset picture", false, "" });
     }
 
+    if (jux_look)
+        e = jux_regroup(e); /* the design's sections */
     std::vector<int> focusable;
     for (int i = 0; i < (int)e.size(); i++)
         if (e[i].kind)
@@ -6178,9 +6552,21 @@ void modal_tracks()
         modal = NONE;
         return;
     }
-    for (PanelEntry &p : e)
+    for (PanelEntry &p : e) {
         if (p.kind == 7)
             p.shown = setting_value(p.value);
+        else if (p.kind == 10) {
+            char v[16];
+            snprintf(v, sizeof(v), "%+.1f dB", player_eq_amp(p.value));
+            p.shown = v;
+        }
+    }
+    /* a band: <- -> move it by 1 dB, X back to 0 */
+    bool on_band = !focusable.empty() && e[focusable[modal_focus]].kind == 10;
+    if (on_band && (hit(PAD_LEFT) || hit(PAD_RIGHT))) {
+        int b = e[focusable[modal_focus]].value;
+        player_set_eq_amp(b, player_eq_amp(b) + (hit(PAD_RIGHT) ? 1 : -1));
+    }
     bool on_setting = !focusable.empty() && e[focusable[modal_focus]].kind == 7;
     if (on_setting && (hit(PAD_LEFT) || hit(PAD_RIGHT)))
         setting_change(e[focusable[modal_focus]].value, hit(PAD_RIGHT) ? 1 : -1);
@@ -6203,6 +6589,8 @@ void modal_tracks()
             toast("Subtitles loaded", 1.5);
         else if (p.kind == 7)
             setting_change(p.value, 0);
+        else if (p.kind == 10)
+            player_set_eq_amp(p.value, 0);
         else if (p.kind == 8) {
             player_set_chapter(p.value);
             last_seek_at = now;
@@ -6216,6 +6604,10 @@ void modal_tracks()
     }
 
     float a = ease(modal_anim);
+    if (jux_look) {
+        jux_tracks_draw(e, focusable, a);
+        return;
+    }
     float w = 600, x = 1920 - w * a;
     dl->AddRectFilledMultiColor(P(x - 200, 0), P(x, 1080), IM_COL32(0, 0, 0, 0), alpha(IM_COL32(0, 0, 0, 255), 0.6f * a),
                                 alpha(IM_COL32(0, 0, 0, 255), 0.6f * a), IM_COL32(0, 0, 0, 0));
@@ -6269,7 +6661,7 @@ void modal_tracks()
         }
         bool foc = !focusable.empty() && i == focusable[modal_focus];
         float f = focus_anim(hash_id(p.kind == 5 ? "volume" : p.label, 600 + p.kind * 100 + p.value), foc);
-        if (p.kind == 7) {
+        if (p.kind == 7 || p.kind == 10) {
             list_row(x + 28, y, w - 56, 56, f, false);
             text(f_semi, 23, x + 72, y + 14, mix(C_DIM, C_TEXT, 0.6f + 0.4f * f), p.label.c_str());
             float vx = x + w - 72;
@@ -6377,6 +6769,15 @@ void spinner(float cx, float cy, float r)
  * the centre. ✕ plays it again, ○ goes back, L1/R1 the previous / next file. */
 void end_screen()
 {
+    /* over the darkened picture: light words even on Redesign's light theme */
+    struct KeepText {
+        ImU32 t = C_TEXT, d = C_DIM;
+        ~KeepText() { C_TEXT = t, C_DIM = d; }
+    } keep;
+    if (jux_look && jux_light) {
+        C_TEXT = IM_COL32(245, 245, 248, 255);
+        C_DIM = IM_COL32(170, 170, 178, 255);
+    }
     float k = ease((float)std::min(1.0, (now - ended_at) * 4));
     rect(0, 0, 1920, 1080, alpha(IM_COL32(0, 0, 0, 255), 0.6f * k));
     if (modal == NONE) {
@@ -6569,10 +6970,10 @@ void player_overlay_classic(float a, int64_t t, int64_t len, bool paused, const 
 
     /* the buttons (the same order as Modern's) */
     float cy = py + 146;
-    const float xs[10] = { 960 - 270, 960 - 150, 960, 960 + 150, 960 + 270, 960 + 380,
-                           1824 - 330, 1824 - 230, 1824 - 130, 1824 - 30 };
+    const float xs[11] = { 960 - 270, 960 - 150, 960, 960 + 150, 960 + 270, 960 + 380,
+                           1824 - 330, 1824 - 230, 1824 - 130, 1824 - 30, 960 + 457 };
     int repeat_mode = loop_on() ? 2 : 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 11; i++) {
         bool foc = osd_row == 1 && osd_col == i && modal == NONE;
         float f = focus_anim(800 + i, foc, 16);
         float x = xs[i];
@@ -6589,7 +6990,7 @@ void player_overlay_classic(float a, int64_t t, int64_t len, bool paused, const 
                 icon_pause(x, cy, 26, alpha(IM_COL32(255, 255, 255, 255), a));
             continue;
         }
-        float bw = i < 6 ? 76 : 70, bh = 56;
+        float bw = i == OSD_VOLUME ? 64 : i < 6 ? 76 : 70, bh = 56;
         vgrad(x - bw / 2, cy - bh / 2, bw, bh, alpha(IM_COL32(72, 77, 87, 255), a), alpha(IM_COL32(40, 43, 49, 255), a));
         stroke(x - bw / 2, cy - bh / 2, bw, bh, alpha(IM_COL32(10, 11, 13, 255), a), 4, 1);
         rect(x - bw / 2 + 2, cy - bh / 2 + 1, bw - 4, 1, alpha(IM_COL32(255, 255, 255, 34), a));
@@ -6601,20 +7002,25 @@ void player_overlay_classic(float a, int64_t t, int64_t len, bool paused, const 
         case 3: icon_jump(x, cy, sz * 1.05f, ic, true, "10"); break;
         case 4: icon_skip(x, cy, sz * 0.8f, ic, true); break;
         case 5: icon_repeat(x, cy, sz, repeat_mode ? alpha(C_ORANGE, a) : ic, repeat_mode); break;
-        case 6: icon_speaker(x, cy, sz, ic); break;
+        case 6: jux_icon_wave(x, cy, sz, ic); break; /* (the speaker is the volume's now) */
         case 7: icon_cc(x, cy, sz, ic); break;
         case 8: icon_speed(x, cy, sz, ic); break;
         case 9: icon_picture(x, cy, sz, ic); break;
+        case OSD_VOLUME: /* the volume: up / down while it's chosen */
+            icon_speaker(x, cy - 5, sz * 0.8f, ic);
+            rect(x - 22, cy + 16, 44, 4, alpha(IM_COL32(10, 11, 13, 255), a), 2);
+            rect(x - 22, cy + 16, 44 * std::min(1.0f, player_volume() / 200.0f), 4, alpha(C_ORANGE, a), 2);
+            break;
         }
     }
     static const char *const tips[10] = { "Previous", "Back 10 s", "Play / Pause", "Forward 10 s",
                                           "Next", "Loop", "Audio & volume", "Subtitles", "Playback", "Picture" };
+    char vol_tip[48];
+    snprintf(vol_tip, sizeof(vol_tip), "%s  %d%%", tr("Volume"), player_volume());
     if (osd_row == 1 && modal == NONE && osd_col != 2) /* the big play button needs no name */
-        text(f_reg, 19, xs[osd_col], cy + 32, alpha(C_DIM, a), tips[osd_col], 0.5f); /* under it: clear of the times */
-    if (paused)
-        hints(560, cy, { { PAD_SQUARE, "Next frame (hold: keep going)" }, { PAD_CIRCLE, "Back" } }, a * 0.9f);
-    else
-        hints(560, cy, { { PAD_TRIANGLE, "Tracks" }, { PAD_CIRCLE, "Back" } }, a * 0.9f);
+        text(f_reg, 19, xs[osd_col], cy + 32, alpha(C_DIM, a), osd_col == OSD_VOLUME ? vol_tip : tips[osd_col], 0.5f); /* under it: clear of the times */
+    /* (no frame-step hint when paused: it covered the picture; square still steps) */
+    hints(560, cy, { { PAD_TRIANGLE, "Tracks" }, { PAD_CIRCLE, "Back" } }, a * 0.9f);
 }
 
 /* ---- the photo viewer --------------------------------------------------------------
@@ -7163,13 +7569,21 @@ void player_screen()
         } else if (!osd && (hit(PAD_LEFT) || hit(PAD_RIGHT))) {
             /* Overlay hidden: ←/→ jump 10 s right away. */
             player_seek(t + (hit(PAD_RIGHT) ? 10000 : -10000));
+            tick();
             last_seek_at = now;
             osd_row = 0;
         } else if (!osd && hit(PAD_CROSS) && now - last_seek_at > 1.5) {
             player_toggle_pause();
+            buzz(0.25f, 25);
             pulse_anim = 1;
             pulse_paused = !paused;
         } else if (osd) {
+            bool on_volume = osd_row == 1 && osd_col == OSD_VOLUME;
+            if (on_volume && (hit(PAD_UP) || hit(PAD_DOWN))) {
+                player_set_volume(player_volume() + (hit(PAD_UP) ? 5 : -5));
+                buzz(0.08f, 10);
+                pressed &= ~(PAD_UP | PAD_DOWN);
+            }
             if (hit(PAD_UP))
                 osd_row = 0;
             if (hit(PAD_DOWN))
@@ -7197,25 +7611,39 @@ void player_screen()
                     } else if (now - last_seek_at > 1.5) {
                         /* (✕ just after the jump landed means "OK", not pause.) */
                         player_toggle_pause();
+                        buzz(0.25f, 25);
                         pulse_anim = 1;
                         pulse_paused = !paused;
                     }
                 }
             } else {
-                if (hit(PAD_LEFT) && osd_col > 0)
-                    osd_col--;
-                if (hit(PAD_RIGHT) && osd_col < 9)
-                    osd_col++;
+                {
+                    /* the bar from left to right: prev .. next, then the volume
+                     * (Redesign: before loop, where its design has it; Modern
+                     * and Classic: after loop) */
+                    static const int jux_order[11] = { 0, 1, 2, 3, 4, OSD_VOLUME, 5, 6, 7, 8, 9 };
+                    static const int other_order[11] = { 0, 1, 2, 3, 4, 5, OSD_VOLUME, 6, 7, 8, 9 };
+                    const int *order = jux_look ? jux_order : other_order;
+                    int at = 0;
+                    for (int i = 0; i < 11; i++)
+                        if (order[i] == osd_col)
+                            at = i;
+                    if (hit(PAD_LEFT) && at > 0)
+                        osd_col = order[--at];
+                    if (hit(PAD_RIGHT) && at < 10)
+                        osd_col = order[++at];
+                }
                 if (hit(PAD_CROSS)) {
                     switch (osd_col) {
                     case 0: play_neighbour(-1); return;
-                    case 1: player_seek(t - 10000); break;
+                    case 1: player_seek(t - 10000); tick(); break;
                     case 2:
                         player_toggle_pause();
+                        buzz(0.25f, 25);
                         pulse_anim = 1;
                         pulse_paused = !paused;
                         break;
-                    case 3: player_seek(t + 10000); break;
+                    case 3: player_seek(t + 10000); tick(); break;
                     case 4: play_neighbour(1); return;
                     case 5: {
                         /* VLC's loop button: off, all, this file. */
@@ -7227,6 +7655,10 @@ void player_screen()
                                         : (song ? "Loop off: this song plays once" : "Loop off: this video plays once"), 1.5);
                         break;
                     }
+                    case OSD_VOLUME: /* X on the volume: mute, or back to 100% */
+                        player_set_volume(player_volume() > 0 ? 0 : 100);
+                        buzz(0.3f, 30);
+                        break;
                     case 6: case 7: case 8: case 9:
                         /* Audio, Subtitles, Playback, Picture: their own panel. */
                         modal = TRACKS;
@@ -7307,10 +7739,11 @@ void player_screen()
         pulse_anim = approach(pulse_anim, 0, 5);
         float k = pulse_anim, r = 70 + (1 - k) * 30;
         circle(960, 540, r, alpha(IM_COL32(0, 0, 0, 255), 0.55f * k));
+        /* (over the picture: light in every look and theme) */
         if (pulse_paused)
-            icon_pause(960, 540, 48, alpha(C_TEXT, k));
+            icon_pause(960, 540, 48, alpha(IM_COL32(245, 245, 248, 255), k));
         else
-            icon_play(965, 540, 52, alpha(C_TEXT, k));
+            icon_play(965, 540, 52, alpha(IM_COL32(245, 245, 248, 255), k));
     }
     /* Paused: say so for as long as it lasts, so a still picture never looks
      * like a stuck one. */
@@ -7320,7 +7753,7 @@ void player_screen()
         float k = pause_badge;
         circle(960, 540, 66, alpha(IM_COL32(0, 0, 0, 255), 0.6f * k));
         ring(960, 540, 66, alpha(C_ORANGE, 0.9f * k), 3);
-        icon_pause(960, 540, 44, alpha(C_TEXT, k));
+        icon_pause(960, 540, 44, alpha(IM_COL32(245, 245, 248, 255), k));
     }
 
     if (a < 0.01f)
@@ -7365,6 +7798,10 @@ void player_screen()
     }
     if (classic_look) {
         player_overlay_classic(a, t, len, paused, meta);
+        return;
+    }
+    if (jux_look) {
+        player_overlay_jux(a, t, len, paused, meta);
         return;
     }
     /* Top: title and what's playing. */
@@ -7438,11 +7875,11 @@ void player_screen()
     float cy = 1080 - 88 + (1 - a) * 30;
     struct Btn {
         float x, r;
-    } btn[10] = { { 960 - 280, 32 }, { 960 - 145, 36 }, { 960, 46 }, { 960 + 145, 36 },
+    } btn[11] = { { 960 - 280, 32 }, { 960 - 145, 36 }, { 960, 46 }, { 960 + 145, 36 },
                   { 960 + 280, 32 }, { 960 + 395, 28 }, { 1824 - 330, 30 }, { 1824 - 230, 30 },
-                  { 1824 - 130, 30 }, { 1824 - 30, 30 } };
+                  { 1824 - 130, 30 }, { 1824 - 30, 30 }, { 960 + 464, 26 } };
     int repeat_mode = loop_on() ? 2 : 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 11; i++) {
         bool foc = osd_row == 1 && osd_col == i && modal == NONE;
         float f = focus_anim(800 + i, foc, 16);
         float r = btn[i].r * (1 + 0.12f * f);
@@ -7467,23 +7904,30 @@ void player_screen()
             icon_repeat(btn[i].x, cy, s * 1.0f,
                         repeat_mode ? alpha(f > 0.5f ? C_BG : C_ORANGE, a) : ic, repeat_mode);
             break;
-        case 6: icon_speaker(btn[i].x, cy, s * 1.0f, ic); break;
+        case 6: jux_icon_wave(btn[i].x, cy, s * 1.0f, ic); break; /* (the speaker is the volume's now) */
         case 7: icon_cc(btn[i].x, cy, s * 1.0f, ic); break;
         case 8: icon_speed(btn[i].x, cy, s * 1.0f, ic); break;
         case 9: icon_picture(btn[i].x, cy, s * 1.0f, ic); break;
+        case OSD_VOLUME: { /* the volume: up / down while it's chosen; a ring shows how loud */
+            icon_speaker(btn[i].x, cy, s * 0.85f, ic);
+            float lvl = std::min(1.0f, player_volume() / 200.0f);
+            dl->PathArcTo(P(btn[i].x, cy), (r + 5) * S, -1.5708f, -1.5708f + 6.2832f * lvl, 32);
+            dl->PathStroke(alpha(C_ORANGE, a), 0, 3 * S);
+            break;
+        }
         }
     }
     /* What the focused button does. */
     static const char *const tips[10] = { "Previous", "Back 10 s", "Play / Pause", "Forward 10 s",
                                           "Next", "Loop", "Audio & volume", "Subtitles", "Playback", "Picture" };
+    char vol_tip[48];
+    snprintf(vol_tip, sizeof(vol_tip), "%s  %d%%", tr("Volume"), player_volume());
     if (osd_row == 1 && modal == NONE && osd_col != 2) /* the big play button needs no name */
-        text(f_semi, 20, btn[osd_col].x, cy + btn[osd_col].r + 8, alpha(C_DIM, a), tips[osd_col], 0.5f); /* under it */
-    /* Left of the transport buttons, clear of them. */
-    if (paused)
-        hints(600, 1080 - 88 + (1 - a) * 30, { { PAD_SQUARE, "Next frame (hold: keep going)" }, { PAD_CIRCLE, "Back" } }, a * 0.9f);
-    else
-        hints(600, 1080 - 88 + (1 - a) * 30,
-              { { PAD_TRIANGLE, "Tracks" }, { PAD_CIRCLE, "Back" } }, a * 0.9f);
+        text(f_semi, 20, btn[osd_col].x, cy + btn[osd_col].r + 8, alpha(C_DIM, a),
+             osd_col == OSD_VOLUME ? vol_tip : tips[osd_col], 0.5f); /* under it */
+    /* Left of the transport buttons, clear of them. (No frame-step hint when
+     * paused: it covered the picture; square still steps.) */
+    hints(600, 1080 - 88 + (1 - a) * 30, { { PAD_TRIANGLE, "Tracks" }, { PAD_CIRCLE, "Back" } }, a * 0.9f);
 }
 
 /* A theme from a drive or /data/vlc: vlc-theme.txt with "name=", "accent=#RRGGBB"
@@ -7541,6 +7985,16 @@ void toast_draw()
         circle(960 - tw / 2 + 24, y + 28, 9, alpha(C_ORANGE, ta));
         text(f_bold, 15, 960 - tw / 2 + 24, y + 18, alpha(IM_COL32(255, 255, 255, 255), ta), "i", 0.5f);
         text(f_semi, 24, 960 + 10, y + 14, alpha(C_TEXT, ta), toast_text.c_str(), 0.5f);
+        return;
+    }
+    if (jux_look) {
+        tw = text_size(f_reg, 24, toast_text.c_str()).x + 70;
+        float tx = screen == LIBRARY ? 1110 : 960; /* (the library: under its top bar, past the sidebar) */
+        glow(tx - tw / 2, y, tw, 56, 12, alpha(IM_COL32(0, 0, 0, 255), J_SHADE * ta), 18, 6);
+        rect(tx - tw / 2, y, tw, 56, alpha(J_POP, ta), 12);
+        stroke(tx - tw / 2, y, tw, 56, alpha(J_LINE, ta), 12, 1.2f);
+        rect(tx - tw / 2 + 16, y + 16, 4, 24, alpha(C_ORANGE, ta), 2);
+        text(f_reg, 24, tx + 8, y + 14, alpha(J_TEXT, ta), toast_text.c_str(), 0.5f);
         return;
     }
     glow(960 - tw / 2, y, tw, 56, 28, alpha(IM_COL32(0, 0, 0, 255), ta), 20);
@@ -7629,6 +8083,9 @@ bool ui_init()
     if (!f_mono) {
         f_mono = f_reg;
     }
+    f_time = jux_look ? add("DMMono-Regular.ttf", nullptr) : nullptr;
+    if (!f_time)
+        f_time = f_semi;
     logo_tex = library_load_image(std::string(plat_data_dir()) + "/assets/vlc-logo.png", &logo_aspect);
     load_usb_theme();
     apply_theme();
@@ -7643,12 +8100,16 @@ bool ui_init()
      * goes on as it was */
     if (!pref_int("setup_done", 0)) {
         if (prefs_existed()) {
-            pref_set("look", classic_look ? 1 : 0);
+            pref_set("look", look_id);
             pref_set("setup_done", 1);
         } else {
             setup_begin(true);
         }
     }
+    /* v0.6 has a third look: someone who used VLC before gets to choose
+     * again, once (a new install chooses in the setup) */
+    if (!pref_int("look_asked_06", 0))
+        setup_look_choice();
     return true;
 }
 
@@ -7663,9 +8124,10 @@ int setup_page;
 float setup_slide;
 double setup_since;
 int setup_lang_focus, setup_look, setup_row;
-bool setup_was_classic;
-ImTextureID setup_img[2];
-float setup_img_aspect[2] = { 16.0f / 9, 16.0f / 9 };
+int setup_was_look;
+bool setup_look_only;   /* only the look's page (an update with a new look) */
+ImTextureID setup_img[LOOK_COUNT];
+float setup_img_aspect[LOOK_COUNT] = { 16.0f / 9, 16.0f / 9, 16.0f / 9 };
 const int SETUP_PAGES = 4;
 double setup_leaving = -1;  /* the last fade to black began */
 double setup_ended = -10;   /* the home screen comes up out of black from here */
@@ -7678,8 +8140,9 @@ void setup_begin(bool with_logo)
     setup_slide = 0;
     setup_since = -1; /* from its first frame (at start-up the clock isn't running yet) */
     setup_lang_focus = lang_current();
-    setup_was_classic = classic_look;
-    setup_look = classic_look ? 1 : 0;
+    setup_was_look = look_id;
+    setup_look = look_id;
+    setup_look_only = false;
     setup_row = 0;
     setup_leaving = -1;
     modal = NONE;
@@ -7689,16 +8152,31 @@ void setup_begin(bool with_logo)
         std::string dir = std::string(plat_data_dir()) + "/assets/setup/";
         setup_img[0] = library_load_image(dir + "modern.png", &setup_img_aspect[0]);
         setup_img[1] = library_load_image(dir + "classic.png", &setup_img_aspect[1]);
+        setup_img[2] = library_load_image(dir + "redesign.png", &setup_img_aspect[2]);
     }
+}
+
+/* only the look's page (v0.6's third look, for someone who used VLC before),
+ * unless the whole setup is on already */
+void setup_look_choice()
+{
+    if (setup_on)
+        return;
+    setup_begin(false);
+    setup_look_only = true;
+    setup_page = 1;
+    setup_slide = 1;
 }
 
 void setup_finish()
 {
     pref_set("setup_done", 1);
+    pref_set("look_asked_06", 1);
     setup_on = false;
+    setup_look_only = false;
     setup_ended = now;
     screen_fade = 0;
-    if ((setup_look == 1) != setup_was_classic) {
+    if (setup_look != setup_was_look) {
         /* the other look: VLC starts again in it */
         pref_set("look", setup_look);
         plat_restart();
@@ -7731,14 +8209,17 @@ void setup_page_draw(int p, float ox, float a, bool active, float since)
     float lw = ease((float)std::min(1.0, (now - setup_lang_at) / 0.4));
     auto k = [&](int order) { return setup_k(since, order); };
     auto dy = [&](int order) { return (1 - k(order)) * 22; };
-    ImU32 card = IM_COL32(28, 28, 35, 255);
-    auto txt = [&](float m) { return alpha(IM_COL32(245, 245, 248, 255), a * m); };
-    auto dim = [&](float m) { return alpha(IM_COL32(150, 150, 162, 255), a * m); };
+    /* her greys (the setup is in "Redesign by Juxtopposed"'s style for every
+     * look: the user, 2026-10-21), the accent's dark tone for what is chosen */
+    ImU32 card = J_PANEL;
+    ImU32 adark = mix(C_ORANGE, IM_COL32(0, 0, 0, 255), 0.74f);
+    auto txt = [&](float m) { return alpha(J_TEXT, a * m); };
+    auto dim = [&](float m) { return alpha(J_DIM, a * m); };
     float cx = 960 + ox;
     if (p == 0) {
         /* Welcome, and the language (it changes as you move) */
-        logo(cx, 210 + dy(0), 120, a * k(0));
-        text(f_bold, 58, cx, 300 + dy(1), txt(k(1) * lw), "Welcome to VLC", 0.5f);
+        logo(cx, 210 + dy(0), 120, a * k(0)); /* VLC's own cone: her design around it (the user) */
+        text(f_reg, 60, cx, 290 + dy(1), txt(k(1) * lw), "Welcome to VLC", 0.5f);
         text(f_reg, 26, cx, 385 + dy(2), dim(k(2) * lw), "Choose your language", 0.5f);
         int n = lang_count();
         const float bw = 350, bh = 74, gap = 18;
@@ -7759,52 +8240,63 @@ void setup_page_draw(int p, float ox, float a, bool active, float since)
             int order = 3 + i / 4; /* row by row */
             float m = k(order);
             float x = x0 + (i % 4) * (bw + gap), y = y0 + (i / 4) * (bh + gap) + dy(order);
-            float f = focus_anim(9000 + i, i == setup_lang_focus, 10);
+            float f = ease(focus_anim(9000 + i, i == setup_lang_focus, 10));
             if (f > 0.01f)
-                glow(x, y, bw, bh, 18, alpha(C_ORANGE, 0.4f * f * a * m), 14, 6);
-            rect(x, y, bw, bh, alpha(mix(card, C_ORANGE, f), a * m), 18);
-            text_as_is(f_semi, 26, x + bw / 2, y + 22,
-                       alpha(mix(IM_COL32(220, 220, 228, 255), IM_COL32(255, 255, 255, 255), f), a * m), lang_native_name(i), 0.5f);
+                glow(x, y, bw, bh, 10, alpha(C_ORANGE, 0.3f * f * a * m), 12, 5);
+            rect(x, y, bw, bh, alpha(mix(J_CTRL, adark, f), a * m), 10);
+            stroke(x, y, bw, bh, alpha(mix(J_LINE, C_ORANGE, f), a * m), 10, 1.2f + f);
+            text_as_is(f_reg, 26, x + bw / 2, y + 22, alpha(mix(J_DIM, C_ORANGE, f), a * m), lang_native_name(i), 0.5f);
         }
     } else if (p == 1) {
-        /* the look: two pictures of the home screen */
-        text(f_bold, 52, cx, 150 + dy(0), txt(k(0)), "Choose your look", 0.5f);
-        text(f_reg, 24, cx, 228 + dy(1), dim(k(1)), "You can change it later in Settings", 0.5f);
+        /* the look: three pictures of the home screen */
+        text(f_reg, 54, cx, 150 + dy(0), txt(k(0)), setup_look_only ? "A new look is here" : "Choose your look",
+             0.5f);
+        text(f_reg, 24, cx, 228 + dy(1), dim(k(1)),
+             setup_look_only ? "Pick the one you like. You can change it later in Settings"
+                             : "You can change it later in Settings", 0.5f);
+        /* the cards' order: the new look in the middle (the user) */
+        static const int card_look[LOOK_COUNT] = { LOOK_MODERN, LOOK_JUX, LOOK_CLASSIC };
+        int at = 0;
+        for (int c = 0; c < LOOK_COUNT; c++)
+            if (card_look[c] == setup_look)
+                at = c;
         if (active) {
-            if (hit(PAD_LEFT))
-                setup_look = 0;
-            if (hit(PAD_RIGHT))
-                setup_look = 1;
+            if (hit(PAD_LEFT) && at > 0)
+                setup_look = card_look[--at];
+            if (hit(PAD_RIGHT) && at + 1 < LOOK_COUNT)
+                setup_look = card_look[++at];
         }
-        static const char *const names[2] = { "Modern", "Classic" };
-        static const char *const descs[2] = { "Black and clean, in the style of VLC 4",
-                                              "Panels and folders, like a desktop player" };
-        const float cw = 790, ch = 590, gap = 56;
-        float x0 = cx - (2 * cw + gap) / 2;
-        for (int i = 0; i < 2; i++) {
+        static const char *const descs[LOOK_COUNT] = { "Black and clean, in the style of VLC 4",
+                                                       "Panels and folders, like a desktop player",
+                                                       "Juxtopposed's VLC redesign, made for the PS5" };
+        const float cw = 560, ch = 500, gap = 40;
+        float x0 = cx - (LOOK_COUNT * cw + (LOOK_COUNT - 1) * gap) / 2;
+        for (int i = 0; i < LOOK_COUNT; i++) {
+            int L = card_look[i];
             float m = k(2 + i), x = x0 + i * (cw + gap);
-            float f = focus_anim(9100 + i, i == setup_look, 8);
+            float f = focus_anim(9100 + i, L == setup_look, 8);
             float y = 300 - 10 * f + dy(2 + i);
             float am = a * m;
+            glow(x, y + 12, cw, ch, 16, alpha(IM_COL32(0, 0, 0, 255), 0.7f * am), 22, 6);
             if (f > 0.01f)
-                glow(x, y, cw, ch, 26, alpha(C_ORANGE, 0.45f * f * am), 22, 8);
-            rect(x, y, cw, ch, alpha(card, am), 26);
-            stroke(x, y, cw, ch, alpha(mix(IM_COL32(255, 255, 255, 30), C_ORANGE, f), am), 26, 2 + 2 * f);
+                glow(x, y, cw, ch, 16, alpha(C_ORANGE, 0.35f * f * am), 18, 6);
+            rect(x, y, cw, ch, alpha(mix(card, J_RAISED, f), am), 16);
+            stroke(x, y, cw, ch, alpha(mix(J_LINE, C_ORANGE, f), am), 16, 1.5f + 1.5f * f);
             float iw = cw - 60, ih = iw * 9 / 16;
-            if (setup_img[i])
-                dl->AddImageRounded(setup_img[i], P(x + 30, y + 30), P(x + 30 + iw, y + 30 + ih), ImVec2(0, 0), ImVec2(1, 1),
-                                    alpha(IM_COL32_WHITE, am * (0.6f + 0.4f * f)), 14 * S);
+            if (setup_img[L])
+                dl->AddImageRounded(setup_img[L], P(x + 30, y + 30), P(x + 30 + iw, y + 30 + ih), ImVec2(0, 0), ImVec2(1, 1),
+                                    alpha(IM_COL32_WHITE, am * (0.6f + 0.4f * f)), 10 * S);
             else
-                rect(x + 30, y + 30, iw, ih, alpha(IM_COL32(18, 18, 24, 255), am), 14);
-            text(f_bold, 34, x + 40, y + 30 + ih + 30, txt(m), names[i]);
-            text(f_reg, 22, x + 40, y + 30 + ih + 80, dim(m), descs[i], 0, cw - 80);
+                rect(x + 30, y + 30, iw, ih, alpha(J_BAR, am), 10);
+            text(f_semi, 30, x + 40, y + 30 + ih + 30, txt(m), look_names[L], 0, cw - 120);
+            text(f_reg, 22, x + 40, y + 30 + ih + 80, dim(m), descs[L], 0, cw - 80);
             /* the tick of the chosen one grows in */
             circle(x + cw - 56, y + 30 + ih + 50, 20 * (0.6f + 0.4f * f), alpha(C_ORANGE, am * f));
-            icon_check(x + cw - 56, y + 30 + ih + 50, 22 * (0.6f + 0.4f * f), alpha(IM_COL32(255, 255, 255, 255), am * f));
+            icon_check(x + cw - 56, y + 30 + ih + 50, 22 * (0.6f + 0.4f * f), alpha(J_INK, am * f));
         }
     } else if (p == 2) {
         /* what VLC picks for you */
-        text(f_bold, 52, cx, 150 + dy(0), txt(k(0)), "Playback", 0.5f);
+        text(f_reg, 54, cx, 150 + dy(0), txt(k(0)), "Playback", 0.5f);
         text(f_reg, 24, cx, 228 + dy(1), dim(k(1)), "Pick what VLC chooses for you", 0.5f);
         static double changed_at[3] = { -10, -10, -10 };
         if (active) {
@@ -7832,25 +8324,25 @@ void setup_page_draw(int p, float ox, float a, bool active, float since)
             float m = k(2 + r), am = a * m;
             float y = 330 + r * 124 + dy(2 + r);
             float f = focus_anim(9200 + r, r == setup_row, 10);
+            rect(x, y, rw, rh, alpha(mix(card, J_RAISED, f), am), 12);
+            stroke(x, y, rw, rh, alpha(mix(J_LINE, C_ORANGE, 0.6f * f), am), 12, 1.2f);
             if (f > 0.01f)
-                glow(x, y, rw, rh, 20, alpha(C_ORANGE, 0.3f * f * am), 14, 6);
-            rect(x, y, rw, rh, alpha(mix(card, IM_COL32(44, 44, 56, 255), f), am), 20);
+                glow(x, y + 22, 5, rh - 44, 3, alpha(C_ORANGE, 0.5f * f * am), 8, 4);
             rect(x, y + 22, 5, rh - 44, alpha(C_ORANGE, f * am), 3);
-            text(f_semi, 28, x + 44, y + 32, txt(m), labels[r]);
+            text(f_reg, 28, x + 44, y + 32, txt(m), labels[r]);
             /* a new value fades in from the side */
             float c = ease((float)std::min(1.0, (now - changed_at[r]) / 0.3));
             float vx = x + rw - 44;
             float tw = text_size(f_semi, 26, values[r].c_str()).x;
             tri(vx - 2, y + 40, vx - 2, y + 60, vx + 10, y + 50, alpha(C_ORANGE, f * am));
             tri(vx - tw - 40, y + 40, vx - tw - 40, y + 60, vx - tw - 52, y + 50, alpha(C_ORANGE, f * am));
-            text(f_semi, 26, vx - 22 * f + (1 - c) * 12, y + 35,
-                 alpha(mix(IM_COL32(150, 150, 162, 255), IM_COL32(255, 255, 255, 255), 0.4f + 0.6f * f), am * (0.3f + 0.7f * c)),
-                 values[r].c_str(), 1);
+            text(f_reg, 26, vx - 22 * f + (1 - c) * 12, y + 35,
+                 alpha(mix(J_DIM, J_TEXT, 0.4f + 0.6f * f), am * (0.3f + 0.7f * c)), values[r].c_str(), 1);
         }
     } else {
         /* ready: three things worth knowing, then go */
         logo(cx, 200 + dy(0), 110, a * k(0));
-        text(f_bold, 56, cx, 285 + dy(1), txt(k(1)), "You're all set", 0.5f);
+        text(f_reg, 58, cx, 280 + dy(1), txt(k(1)), "You're all set", 0.5f);
         static const struct {
             uint32_t button;
             const char *what;
@@ -7862,7 +8354,8 @@ void setup_page_draw(int p, float ox, float a, bool active, float since)
         for (int i = 0; i < 3; i++) {
             float m = k(2 + i);
             float y = 420 + i * 92 + dy(2 + i);
-            rect(tx, y, tw, 76, alpha(card, a * m), 18);
+            rect(tx, y, tw, 76, alpha(card, a * m), 12);
+            stroke(tx, y, tw, 76, alpha(J_LINE, a * m), 12, 1.2f);
             glyph(tx + 52, y + 38, 24, tips[i].button, a * m);
             text(f_reg, 25, tx + 96, y + 23, txt(m), tips[i].what, 0, tw - 120);
         }
@@ -7870,18 +8363,29 @@ void setup_page_draw(int p, float ox, float a, bool active, float since)
         float bw = 460, bh = 86, bx = cx - bw / 2, by = 740 + dy(5);
         /* a slow breath on the button */
         float pulse = 0.5f + 0.5f * sinf((float)now * 1.6f);
-        glow(bx, by, bw, bh, 43, alpha(C_ORANGE, (0.3f + 0.25f * pulse) * a * m), 22, 8);
-        rect(bx, by, bw, bh, alpha(C_ORANGE, a * m), 43);
-        text(f_bold, 30, cx, by + 26, alpha(IM_COL32(255, 255, 255, 255), a * m), "Start watching", 0.5f);
+        glow(bx, by, bw, bh, 12, alpha(C_ORANGE, (0.3f + 0.25f * pulse) * a * m), 18, 6);
+        rect(bx, by, bw, bh, alpha(C_ORANGE, a * m), 12);
+        text(f_semi, 30, cx, by + 26, alpha(J_INK, a * m), "Start watching", 0.5f);
     }
 }
 
 void setup_screen()
 {
-    /* the setup is drawn Modern whatever the look */
-    bool classic = classic_look;
+    /* the setup is drawn in Redesign by Juxtopposed's style (dark) whatever
+     * the look: her greys, keycaps, outline icons; put back after */
+    struct Keep {
+        bool cl = classic_look, jx = jux_look, lt = jux_light;
+        ~Keep()
+        {
+            classic_look = cl;
+            jux_look = jx;
+            jux_set_theme(lt);
+        }
+    } keep;
     classic_look = false;
-    rect(0, 0, 1920, 1080, IM_COL32(0, 0, 0, 255));
+    jux_look = true;
+    jux_set_theme(false);
+    rect(0, 0, 1920, 1080, J_BG);
     if (setup_since < 0)
         setup_since = now;
     if (setup_boot) {
@@ -7890,14 +8394,13 @@ void setup_screen()
         const float in_s = 1.4f, hold = 4.3f, out_s = 1.4f;
         float t = (float)(now - setup_since);
         float a = t < in_s ? ease(t / in_s) : t < in_s + hold ? 1.0f : 1.0f - ease((t - in_s - hold) / out_s);
-        logo(960, 520, 240, a < 0 ? 0 : a);
+        logo(960, 520, 240, a < 0 ? 0 : a); /* VLC's own cone, as it opens */
         if (t > in_s + hold + out_s + 0.3f) {
             setup_boot = false;
             setup_since = now;
             setup_entered = now;
         }
         pressed = 0;
-        classic_look = classic;
         return;
     }
     if (setup_entered < setup_since)
@@ -7906,17 +8409,17 @@ void setup_screen()
     /* leaving: everything fades to black, then the home screen */
     float out = setup_leaving > 0 ? 1.0f - ease((float)std::min(1.0, (now - setup_leaving) / 0.7)) : 1.0f;
     float g = in * out;
-    /* a warm light from the top that breathes slowly, the rest black */
-    float breath = 0.82f + 0.18f * sinf((float)now * 0.5f);
-    dl->AddRectFilledMultiColor(P(0, 0), P(1920, 560), alpha(IM_COL32(40, 22, 6, 255), g * breath),
-                                alpha(IM_COL32(40, 22, 6, 255), g * breath), IM_COL32(0, 0, 0, 0), IM_COL32(0, 0, 0, 0));
+    /* a faint light of the accent at the top that breathes slowly (as her
+     * library's background) */
+    float breath = 0.75f + 0.25f * sinf((float)now * 0.5f);
+    radial(960, -260, 1100, alpha(C_ORANGE, 0.10f * g * breath));
     /* where you are */
     float dots_w = SETUP_PAGES * 16 + 30;
     float dx = 960 - dots_w / 2;
-    for (int i = 0; i < SETUP_PAGES; i++) {
+    for (int i = 0; i < SETUP_PAGES && !setup_look_only; i++) {
         float f = focus_anim(9300 + i, i == setup_page, 7);
         float w = 10 + 28 * f;
-        rect(dx, 60, w, 10, alpha(mix(IM_COL32(255, 255, 255, 50), C_ORANGE, f), g), 5);
+        rect(dx, 60, w, 8, alpha(mix(J_EDGE, C_ORANGE, f), g), 4);
         dx += w + 12;
     }
     /* pages: a short glide and a crossfade */
@@ -7930,8 +8433,8 @@ void setup_screen()
         setup_page_draw(p, d * 260, g * vis, p == setup_page && fabsf(d) < 0.3f && setup_leaving < 0, since);
     }
     std::vector<std::pair<uint32_t, const char *>> h;
-    h.push_back({ PAD_CROSS, setup_page + 1 < SETUP_PAGES ? "Continue" : "Start" });
-    if (setup_page > 0)
+    h.push_back({ PAD_CROSS, setup_look_only || setup_page + 1 == SETUP_PAGES ? "Start" : "Continue" });
+    if (setup_page > 0 && !setup_look_only)
         h.push_back({ PAD_CIRCLE, "Back" });
     h.push_back({ PAD_OPTIONS, "Skip" });
     hints(1824, 1020, h, g);
@@ -7941,20 +8444,21 @@ void setup_screen()
             setup_finish();
         }
     } else if (hit(PAD_CROSS)) {
-        if (setup_page + 1 < SETUP_PAGES) {
+        if (setup_page + 1 < SETUP_PAGES && !setup_look_only) {
             setup_page++;
             setup_entered = now;
         } else {
             setup_leaving = now;
         }
-    } else if (hit(PAD_CIRCLE) && setup_page > 0) {
+    } else if (hit(PAD_CIRCLE) && setup_page > 0 && !setup_look_only) {
         setup_page--;
         setup_entered = now;
     } else if (hit(PAD_OPTIONS)) {
+        if (setup_look_only)
+            setup_look = setup_was_look; /* skipped: the look stays */
         setup_leaving = now;
     }
     pressed = 0;
-    classic_look = classic;
 }
 
 }  // namespace
@@ -7980,6 +8484,7 @@ void ui_frame(const PadState &pad, float frame_dt)
         ImGui::GetForegroundDrawList()->AddRectFilled(P(0, 0), P(1920, 1080), IM_COL32(0, 0, 0, (int)(255 * k)));
     }
     if (modal == NONE && hit(PAD_OPTIONS)) {
+        tick();
         modal = OPTIONS;
         modal_focus = 0;
         modal_anim = 0;
@@ -8063,10 +8568,15 @@ void ui_frame(const PadState &pad, float frame_dt)
         pressed = keep;
     } else {
         background();
-        tab_bar();
+        if (jux_look)
+            jux_shell();
+        else
+            tab_bar();
         if (sub_pick)
             tab = BROWSE; /* picking: Browse only */
         if (modal == NONE && !sub_pick) {
+            if (hit(PAD_L1) || hit(PAD_R1))
+                tick(); /* a light tick for each tab */
             if (hit(PAD_L1))
                 tab = (Tab)((tab + TABS - 1) % TABS);
             if (hit(PAD_R1))
@@ -8082,6 +8592,8 @@ void ui_frame(const PadState &pad, float frame_dt)
         }
         if (modal == NONE && !sub_pick)
             library_actions();
+        if (jux_look)
+            jux_content_begin();
         switch (tab) {
         case HOME: tab_home(); break;
         case VIDEOS: tab_videos(); break;
@@ -8090,6 +8602,8 @@ void ui_frame(const PadState &pad, float frame_dt)
         case BROWSE: tab_browse(); break;
         default: break;
         }
+        if (jux_look)
+            jux_content_end();
         pressed = keep;
         mini_player();
         if (modal == NONE) {
@@ -8123,7 +8637,7 @@ void ui_frame(const PadState &pad, float frame_dt)
                             (browse_entries[browse_focus].net == NET_FILE || browse_entries[browse_focus].net == NET_NONE);
                 h = { { PAD_CROSS, file ? "Add" : "Open" },
                       { PAD_CIRCLE, browse_dir.empty() && net_path.empty() ? "Cancel" : "Back" } };
-            } else {
+            } else if (!jux_look) { /* (Redesign shows both on screen) */
                 h.push_back({ PAD_R3, "Search" });
                 h.push_back({ PAD_OPTIONS, "Options" });
             }

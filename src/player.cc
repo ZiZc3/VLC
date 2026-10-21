@@ -1521,8 +1521,30 @@ void apply_deinterlace(int mode)
     }
 }
 
+/* the custom bands, kept in prefs as tenths of a dB: eq_pre, eq_b0..eq_b9 */
+float eq_saved(int band)
+{
+    char key[16];
+    if (band < 0)
+        snprintf(key, sizeof(key), "eq_pre");
+    else
+        snprintf(key, sizeof(key), "eq_b%d", band);
+    return pref_int(key, 0) / 10.0f;
+}
+
 void apply_eq(int preset)
 {
+    if (preset == EQ_CUSTOM) {
+        libvlc_equalizer_t *eq = libvlc_audio_equalizer_new();
+        if (eq) {
+            libvlc_audio_equalizer_set_preamp(eq, eq_saved(-1));
+            for (unsigned b = 0; b < libvlc_audio_equalizer_get_band_count(); b++)
+                libvlc_audio_equalizer_set_amp_at_index(eq, eq_saved((int)b), b);
+            libvlc_media_player_set_equalizer(mp, eq);
+            libvlc_audio_equalizer_release(eq);
+        }
+        return;
+    }
     if (preset < 0 || preset >= (int)libvlc_audio_equalizer_get_preset_count()) {
         libvlc_media_player_set_equalizer(mp, nullptr);
         return;
@@ -3795,6 +3817,8 @@ int player_eq_presets()
 
 const char *player_eq_name(int preset)
 {
+    if (preset == EQ_CUSTOM)
+        return "Custom";
     if (preset < 0)
         return "Off";
     const char *n = libvlc_audio_equalizer_get_preset_name(preset);
@@ -3811,6 +3835,58 @@ void player_set_eq(int preset)
     pref_set("eq", preset);
     if (mp)
         apply_eq(preset);
+}
+
+int player_eq_bands()
+{
+    return (int)libvlc_audio_equalizer_get_band_count();
+}
+
+float player_eq_band_hz(int band)
+{
+    return libvlc_audio_equalizer_get_band_frequency((unsigned)band);
+}
+
+float player_eq_amp(int band)
+{
+    int e = player_eq();
+    if (e == EQ_CUSTOM)
+        return eq_saved(band);
+    if (e < 0)
+        return 0;
+    /* a preset's own values */
+    libvlc_equalizer_t *eq = libvlc_audio_equalizer_new_from_preset((unsigned)e);
+    if (!eq)
+        return 0;
+    float v = band < 0 ? libvlc_audio_equalizer_get_preamp(eq) : libvlc_audio_equalizer_get_amp_at_index(eq, (unsigned)band);
+    libvlc_audio_equalizer_release(eq);
+    return v;
+}
+
+void player_set_eq_amp(int band, float db)
+{
+    db = db < -20 ? -20 : db > 20 ? 20 : db;
+    if (player_eq() != EQ_CUSTOM) {
+        /* from the preset that was playing (or flat), then this band */
+        int n = player_eq_bands();
+        int pre = (int)lroundf(player_eq_amp(-1) * 10);
+        std::vector<int> amps;
+        for (int b = 0; b < n; b++)
+            amps.push_back((int)lroundf(player_eq_amp(b) * 10));
+        pref_set("eq_pre", pre);
+        for (int b = 0; b < n; b++) {
+            char key[16];
+            snprintf(key, sizeof(key), "eq_b%d", b);
+            pref_set(key, amps[b]);
+        }
+    }
+    char key[16];
+    if (band < 0)
+        snprintf(key, sizeof(key), "eq_pre");
+    else
+        snprintf(key, sizeof(key), "eq_b%d", band);
+    pref_set(key, (int)lroundf(db * 10));
+    player_set_eq(EQ_CUSTOM);
 }
 
 int player_deinterlace()
