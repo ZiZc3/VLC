@@ -225,7 +225,7 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 - Fonts: **[Inter](https://rsms.me/inter/)**, **Selawik**, **DejaVu Sans Mono** and **Noto**.
 - [iptv-org](https://github.com/iptv-org/iptv), [radio-browser.info](https://www.radio-browser.info/) and [OpenSubtitles](https://www.opensubtitles.com/).
 - **The "Redesign by Juxtopposed" look** is based on **VLC Redesign** by **[Juxtopposed](https://github.com/juxtopposed)**, used under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and adapted for the PS5. Thanks to [StickyGonzales](https://github.com/StickyGonzales/vlc-redesign-juxtopposed) for showing the design working on real VLC.
-- 
+
 ## License
 
 VLC for PS5 is licensed under the **GNU General Public License v3.0** (see [`LICENSE`](LICENSE)).
