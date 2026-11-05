@@ -150,7 +150,7 @@ fi
     --start-group "$work/libprobe.a" "${vlc_inputs[@]}" --end-group \
     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" "$work/stubs/libSceVideodec2.so" \
     "${radv_link_inputs[@]}" \
-    --as-needed "$sdk"/target/lib/*.so 2>&1 | tee "$work/link.log" | grep -E "error|warning" | head -60
+    --as-needed "$sdk"/target/lib/*.so 2>&1 | tee "$work/link.log" | { grep -E "error|warning" || true; } | head -60
 [[ ${PIPESTATUS[0]} -eq 0 && -f $work/llvm-pie.elf ]] || { echo "link failed: $work/link.log" >&2; exit 1; }
 # Guard: the plugins really are in (vmem's description is a string only it has).
 grep -aq "Video memory output" "$work/llvm-pie.elf" ||
