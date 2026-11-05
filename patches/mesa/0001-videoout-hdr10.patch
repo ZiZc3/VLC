@@ -1,6 +1,6 @@
 --- a/src/vulkan/wsi/wsi_common_videoout.c
 +++ b/src/vulkan/wsi/wsi_common_videoout.c
-@@ -146,8 +146,46 @@
+@@ -158,8 +158,46 @@
  {
     return -1;
  }
@@ -44,10 +44,10 @@
 + * BT.2020 primaries and the PQ curve. */
 +#define VLCPS5_VIDEO_OUT_PIXEL_FORMAT_HDR10 UINT64_C(0x8100070400000000)
 +
- /* The display and its modes: one each per process, as VideoOut is. */
- struct wsi_videoout_mode {
-    uint32_t refresh_millihertz;
-@@ -399,6 +437,89 @@
+ /* The sizes VideoOut takes buffers of, the largest first, and a buffer's
+  * bytes: a four-byte image in 64 KiB tiles of 128x128 pixels, rounded up to
+  * the buffers' alignment. 3840x2160 is 30x17 tiles, 31.9 MiB, in 32 MiB. */
+@@ -511,6 +549,92 @@
     return VK_SUCCESS;
  }
  
@@ -67,13 +67,16 @@
 +   struct wsi_videoout_output *out = &videoout_output;
 +   mtx_lock(&out->lock);
 +   int result = -1;
-+   if (out->buffers) {
++   for (uint32_t i = 0; i < out->set_count; i++) {
++      const VkExtent2D extent = out->sets[i].size->extent;
 +      uint8_t attribute[PS5_VIDEO_OUT_ATTRIBUTE_BYTES] = {0};
 +      sceVideoOutSetBufferAttribute2(attribute,
 +                                     enable ? VLCPS5_VIDEO_OUT_PIXEL_FORMAT_HDR10
 +                                            : PS5_VIDEO_OUT_PIXEL_FORMAT_B8G8R8A8_SDR,
-+                                     PS5_VIDEO_OUT_TILING_64KB_R_X, VIDEOOUT_WIDTH, VIDEOOUT_HEIGHT, 0, 0, 0);
-+      result = sceVideoOutSubmitChangeBufferAttribute2(out->handle, 0, attribute, NULL);
++                                     PS5_VIDEO_OUT_TILING_64KB_R_X, extent.width, extent.height, 0, 0, 0);
++      result = sceVideoOutSubmitChangeBufferAttribute2(out->handle, (int32_t)i, attribute, NULL);
++      if (result != 0)
++         break;
 +   }
 +   mtx_unlock(&out->lock);
 +   fprintf(stderr, "wsi/videoout: framebuffers %s: 0x%08x\n", enable ? "HDR10" : "SDR", (unsigned)result);
