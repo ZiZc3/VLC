@@ -55,6 +55,14 @@ int net_list_serial();   /* changes whenever the listing does */
 const std::vector<NetEntry> &net_list_entries();
 std::string net_list_error();
 
+/* A share folder's files, and its subfolders' if asked, read in the
+ * background apart from the listing above, with the share's saved login:
+ * the folder's own (A-Z), then each subfolder's. */
+void net_collect(const std::string &url, bool subfolders);
+void net_collect_stop();
+NetListState net_collect_state();
+const std::vector<NetEntry> &net_collect_files();
+
 /* The listed entry's media, with a reference for the caller (or null). */
 libvlc_media_t *net_take_media(const std::string &url);
 

@@ -85,8 +85,10 @@ std::condition_variable work_cv;
 struct Job {
     std::string path, thumb_file;
     bool audio, image;
+    std::vector<std::string> options; /* a file on a share: its login */
 };
 std::vector<Job> work;           /* files still to look at (copies: no shared items) */
+std::vector<Job> net_work;       /* files on shares in playlists (kept over rescans) */
 std::atomic<bool> running{ false }, busy{ false };
 std::thread worker;
 
@@ -239,6 +241,14 @@ std::string thumb_file(const MediaItem &m)
     snprintf(name, sizeof(name), m.audio ? "/%016llx.song.thumb" : "/%016llx.thumb",
              (unsigned long long)fnv(m.path + "|" + std::to_string(m.size) + "|" +
                                      std::to_string(m.mtime)));
+    return cache_dir + name;
+}
+
+/* A file on a share (a playlist's entry): by its address. */
+std::string net_thumb_file(const std::string &url)
+{
+    char name[64];
+    snprintf(name, sizeof(name), "/%016llx.net.thumb", (unsigned long long)fnv(url));
     return cache_dir + name;
 }
 
@@ -618,11 +628,14 @@ void look_at(const Job &job)
         done.push_back(std::move(out));
         return;
     }
-    libvlc_media_t *m = libvlc_media_new_path(vlc, path.c_str());
+    bool net = path.find("://") != std::string::npos;
+    libvlc_media_t *m = net ? libvlc_media_new_location(vlc, path.c_str()) : libvlc_media_new_path(vlc, path.c_str());
     if (!m)
         return;
-    libvlc_media_parse_with_options(m, libvlc_media_parse_local, 4000);
-    for (int i = 0; i < 100 && libvlc_media_get_parsed_status(m) == 0; i++)
+    for (const std::string &o : job.options)
+        libvlc_media_add_option(m, o.c_str());
+    libvlc_media_parse_with_options(m, net ? libvlc_media_parse_network : libvlc_media_parse_local, net ? 10000 : 4000);
+    for (int i = 0; i < (net ? 220 : 100) && libvlc_media_get_parsed_status(m) == 0; i++)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     out.length_ms = libvlc_media_get_duration(m);
     if (job.audio) {
@@ -701,13 +714,14 @@ void worker_main()
         {
             std::unique_lock<std::mutex> l(work_lock);
             work_cv.wait_for(l, std::chrono::milliseconds(250),
-                             [] { return !running || (!work.empty() && !busy); });
+                             [] { return !running || ((!work.empty() || !net_work.empty()) && !busy); });
             if (!running)
                 break;
-            if (work.empty() || busy)
+            if ((work.empty() && net_work.empty()) || busy)
                 continue;
-            job = work.front();
-            work.erase(work.begin());
+            std::vector<Job> &from = net_work.empty() ? work : net_work;
+            job = from.front();
+            from.erase(from.begin());
         }
         look_at(job);
     }
@@ -1019,6 +1033,9 @@ struct Known {
     std::string title, artist, album;
 };
 std::map<std::string, Known> known;
+/* Playlist entries' thumbnails (files on shares), by thumbnail file; 0 if none. */
+std::map<std::string, std::pair<ImTextureID, float>> net_thumbs;
+void playlist_note(const Finished &t);
 int generation;
 
 void apply(const Finished &t)
@@ -1235,8 +1252,12 @@ void library_update()
         std::lock_guard<std::mutex> l(done_lock);
         ready.swap(done);
     }
-    for (const Finished &t : ready)
-        apply(t);
+    for (const Finished &t : ready) {
+        if (t.path.find("://") != std::string::npos)
+            playlist_note(t);
+        else
+            apply(t);
+    }
     /* Every 2 s while nothing plays (a rescan rebuilds the lists a playlist
      * points into): new drives and new files show up by themselves. */
     double now = plat_time();
@@ -1497,6 +1518,8 @@ int library_playlist_count(const std::string &path)
 
 bool library_playlist_has_links(const std::string &path)
 {
+    if (library_playlist_ours(path))
+        return false; /* ours play in order, files on shares too */
     FILE *f = fopen(path.c_str(), "r");
     if (!f)
         return false;
@@ -1537,13 +1560,23 @@ std::string playlist_file_name(const std::string &name)
     return n.substr(0, 120);
 }
 
-/* The files of one of ours, in order. */
-std::vector<std::string> playlist_read(const std::string &path)
+/* An entry's name when the playlist doesn't give one: its file name, tidied
+ * (an address's "%20"s decoded). */
+std::string entry_name(const std::string &p)
 {
-    std::vector<std::string> out;
+    std::string name = p.substr(p.rfind('/') + 1);
+    return tidy_name(p.find("://") != std::string::npos ? url_decode(name) : name);
+}
+
+/* The entries of one of ours, in order: each path with the #EXTINF length
+ * and name and the #EXTIMG thumbnail before it. */
+std::vector<PlaylistEntry> playlist_read(const std::string &path)
+{
+    std::vector<PlaylistEntry> out;
     FILE *f = fopen(path.c_str(), "r");
     if (!f)
         return out;
+    PlaylistEntry e{ "", "", "", 0, -1 };
     char line[4096];
     while (fgets(line, sizeof(line), f)) {
         std::string l = line;
@@ -1551,24 +1584,45 @@ std::vector<std::string> playlist_read(const std::string &path)
             l.pop_back();
         if (l.size() >= 3 && (unsigned char)l[0] == 0xEF)
             l = l.substr(3);
-        if (!l.empty() && l[0] != '#')
-            out.push_back(l);
+        if (!strncmp(l.c_str(), "#EXTINF:", 8)) {
+            long long secs = atoll(l.c_str() + 8);
+            e.length_ms = secs > 0 ? secs * 1000 : 0;
+            if (l.find(',') != std::string::npos)
+                e.name = l.substr(l.find(',') + 1);
+        } else if (!strncmp(l.c_str(), "#EXTIMG:", 8)) {
+            e.thumb = l.substr(8);
+        } else if (!l.empty() && l[0] != '#') {
+            e.path = l;
+            if (e.name.empty())
+                e.name = entry_name(l);
+            out.push_back(e);
+            e = PlaylistEntry{ "", "", "", 0, -1 };
+        }
     }
     fclose(f);
     return out;
 }
 
+std::vector<PlaylistEntry>::iterator find_entry(std::vector<PlaylistEntry> &files, const std::string &file)
+{
+    return std::find_if(files.begin(), files.end(), [&](const PlaylistEntry &e) { return e.path == file; });
+}
+
 /* Written whole to a temporary file, then put in place. */
-bool playlist_write(const std::string &path, const std::vector<std::string> &files)
+bool playlist_write(const std::string &path, const std::vector<PlaylistEntry> &files)
 {
     std::string tmp = path + ".tmp";
     FILE *f = fopen(tmp.c_str(), "w");
     if (!f)
         return false;
     bool ok = fputs("#EXTM3U\n", f) >= 0;
-    for (const std::string &p : files) {
-        std::string name = p.substr(p.rfind('/') + 1);
-        ok = ok && fprintf(f, "#EXTINF:-1,%s\n%s\n", tidy_name(name).c_str(), p.c_str()) > 0;
+    for (const PlaylistEntry &e : files) {
+        long long secs = e.length_ms > 0 ? e.length_ms / 1000 : -1;
+        std::string name = e.name.empty() ? entry_name(e.path) : e.name;
+        ok = ok && fprintf(f, "#EXTINF:%lld,%s\n", secs, name.c_str()) > 0;
+        if (!e.thumb.empty())
+            ok = ok && fprintf(f, "#EXTIMG:%s\n", e.thumb.c_str()) > 0;
+        ok = ok && fprintf(f, "%s\n", e.path.c_str()) > 0;
     }
     ok = fclose(f) == 0 && ok;
     if (ok)
@@ -1576,6 +1630,30 @@ bool playlist_write(const std::string &path, const std::vector<std::string> &fil
     if (!ok)
         unlink(tmp.c_str());
     return ok;
+}
+
+/* A file on a share was looked at: its length and picture into each of ours
+ * that names it. */
+void playlist_note(const Finished &t)
+{
+    std::string d = playlist_dir() + "/";
+    for (const PlaylistFile &pl : playlists) {
+        if (pl.path.compare(0, d.size(), d) != 0)
+            continue;
+        std::vector<PlaylistEntry> files = playlist_read(pl.path);
+        bool changed = false;
+        for (PlaylistEntry &e : files)
+            if (e.path == t.path) {
+                if (t.length_ms > 0)
+                    e.length_ms = t.length_ms;
+                if (t.w && t.h)
+                    e.thumb = net_thumb_file(t.path);
+                changed = true;
+            }
+        if (changed)
+            playlist_write(pl.path, files);
+    }
+    net_thumbs.erase(net_thumb_file(t.path)); /* read again, now it's there */
 }
 
 void playlists_sort()
@@ -1611,17 +1689,31 @@ std::string library_playlist_create(const std::string &name)
 
 bool library_playlist_add(const std::string &playlist, const std::string &file)
 {
-    std::vector<std::string> files = playlist_read(playlist);
-    if (std::find(files.begin(), files.end(), file) != files.end())
+    std::vector<PlaylistEntry> files = playlist_read(playlist);
+    if (find_entry(files, file) != files.end())
         return false;
-    files.push_back(file);
+    files.push_back({ file, entry_name(file), "", 0, -1 });
     return playlist_write(playlist, files);
+}
+
+int library_playlist_add_files(const std::string &playlist, const std::vector<std::string> &add)
+{
+    std::vector<PlaylistEntry> files = playlist_read(playlist);
+    int added = 0;
+    for (const std::string &file : add)
+        if (find_entry(files, file) == files.end()) {
+            files.push_back({ file, entry_name(file), "", 0, -1 });
+            added++;
+        }
+    if (added == 0 || !playlist_write(playlist, files))
+        return 0;
+    return added;
 }
 
 bool library_playlist_remove(const std::string &playlist, const std::string &file)
 {
-    std::vector<std::string> files = playlist_read(playlist);
-    auto it = std::find(files.begin(), files.end(), file);
+    std::vector<PlaylistEntry> files = playlist_read(playlist);
+    auto it = find_entry(files, file);
     if (it == files.end())
         return false;
     files.erase(it);
@@ -1630,22 +1722,70 @@ bool library_playlist_remove(const std::string &playlist, const std::string &fil
 
 bool library_playlist_move(const std::string &playlist, const std::string &file, int step)
 {
-    std::vector<std::string> files = playlist_read(playlist);
-    auto it = std::find(files.begin(), files.end(), file);
+    std::vector<PlaylistEntry> files = playlist_read(playlist);
+    auto it = find_entry(files, file);
     if (it == files.end())
         return false;
     /* to the next one the library has (a file on a drive that's out is
-     * skipped over, so a move always shows) */
+     * skipped over, so a move always shows; a share's file is always shown) */
     long i = it - files.begin(), j = i;
     do
         j += step;
-    while (j >= 0 && j < (long)files.size() && !library_find(files[j]));
+    while (j >= 0 && j < (long)files.size() && !library_find(files[j].path) &&
+           files[j].path.find("://") == std::string::npos);
     if (j < 0 || j >= (long)files.size())
         return false;
-    std::string moved = files[i];
+    PlaylistEntry moved = files[i];
     files.erase(files.begin() + i);
     files.insert(files.begin() + j, moved);
     return playlist_write(playlist, files);
+}
+
+std::vector<PlaylistEntry> library_playlist_entries(const std::string &path)
+{
+    std::vector<PlaylistEntry> out;
+    for (PlaylistEntry &e : playlist_read(path)) {
+        if (e.path.find("://") == std::string::npos) {
+            MediaItem *m = library_find(e.path);
+            if (!m)
+                continue; /* not in the library (its drive is out) */
+            e.item = (int)(m - &items[0]);
+        }
+        out.push_back(e);
+    }
+    return out;
+}
+
+void library_playlist_look_at(const std::string &url, const std::vector<std::string> &options)
+{
+    {
+        std::lock_guard<std::mutex> l(work_lock);
+        for (const Job &j : net_work)
+            if (j.path == url)
+                return;
+        std::string name = url.substr(0, url.find('?'));
+        name = url_decode(name.substr(name.rfind('/') + 1));
+        bool audio = false;
+        if (name.rfind('.') != std::string::npos)
+            audio = has_ext(name.c_str() + name.rfind('.') + 1, audio_exts);
+        net_work.push_back({ url, net_thumb_file(url), audio, false, options });
+    }
+    work_cv.notify_all();
+}
+
+ImTextureID library_thumb(const std::string &file, float *aspect)
+{
+    auto it = net_thumbs.find(file);
+    if (it == net_thumbs.end()) {
+        Finished t;
+        std::pair<ImTextureID, float> v{ 0, 0 };
+        if (read_thumb(file, t) && t.w && t.h && !t.bgra.empty())
+            v = { make_texture(t), (float)t.w / t.h };
+        it = net_thumbs.emplace(file, v).first;
+    }
+    if (aspect)
+        *aspect = it->second.second;
+    return it->second.first;
 }
 
 std::string library_playlist_rename(const std::string &playlist, const std::string &name)

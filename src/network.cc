@@ -584,6 +584,94 @@ void search_update()
     }
 }
 
+/* ---- a share folder's files, read apart from the listing in Browse ----
+ * One folder at a time, with the share's saved login and no questions asked:
+ * a folder's own files (A-Z), then each of its subfolders' if asked. */
+
+libvlc_media_t *collecting;
+NetListState collect_state = NET_IDLE;
+bool collect_subfolders;
+int collect_listed;                     /* folders read so far */
+std::vector<std::string> collect_queue; /* folders still to read, the next first */
+std::vector<NetEntry> collect_found;
+
+bool collect_open(const std::string &url)
+{
+    libvlc_instance_t *vlc = player_vlc();
+    collecting = vlc ? libvlc_media_new_location(vlc, url.c_str()) : nullptr;
+    if (!collecting)
+        return false;
+    for (const std::string &o : net_login_options(url))
+        libvlc_media_add_option(collecting, o.c_str());
+    if (libvlc_media_parse_with_options(collecting, libvlc_media_parse_network, 30000) != 0) {
+        libvlc_media_release(collecting);
+        collecting = nullptr;
+        return false;
+    }
+    return true;
+}
+
+/* The next folder waiting, or done. A subfolder that can't be read is left out. */
+void collect_next()
+{
+    while (!collect_queue.empty()) {
+        std::string url = collect_queue.front();
+        collect_queue.erase(collect_queue.begin());
+        if (collect_open(url))
+            return;
+        fprintf(stderr, "net: couldn't read %s\n", url.c_str());
+    }
+    collect_state = NET_READY;
+    fprintf(stderr, "net: %zu files in %d folders\n", collect_found.size(), collect_listed);
+}
+
+void collect_folder_done()
+{
+    bool ok = libvlc_media_get_parsed_status(collecting) == libvlc_media_parsed_status_done;
+    std::vector<NetEntry> files, dirs;
+    libvlc_media_list_t *subs = ok ? libvlc_media_subitems(collecting) : nullptr;
+    if (subs) {
+        libvlc_media_list_lock(subs);
+        for (int i = 0; i < libvlc_media_list_count(subs); i++) {
+            libvlc_media_t *m = libvlc_media_list_item_at_index(subs, i);
+            if (!m)
+                continue;
+            char *mrl = libvlc_media_get_mrl(m), *title = libvlc_media_get_meta(m, libvlc_meta_Title);
+            if (mrl) {
+                NetEntry e;
+                e.url = without_login(mrl);
+                e.name = title ? title : e.url.substr(e.url.rfind('/') + 1);
+                e.dir = libvlc_media_get_type(m) == libvlc_media_type_directory;
+                if (!e.name.empty() && e.name[0] != '.' && e.name.back() != '$')
+                    (e.dir ? dirs : files).push_back(e);
+            }
+            free(mrl);
+            free(title);
+            libvlc_media_release(m);
+        }
+        libvlc_media_list_unlock(subs);
+        libvlc_media_list_release(subs);
+    }
+    libvlc_media_release(collecting);
+    collecting = nullptr;
+    if (!ok && collect_listed == 0) {
+        collect_state = NET_FAILED;
+        fprintf(stderr, "net: couldn't read the folder\n");
+        return;
+    }
+    collect_listed++;
+    auto by_name = [](const NetEntry &a, const NetEntry &b) { return strcasecmp(a.name.c_str(), b.name.c_str()) < 0; };
+    std::stable_sort(files.begin(), files.end(), by_name);
+    std::stable_sort(dirs.begin(), dirs.end(), by_name);
+    collect_found.insert(collect_found.end(), files.begin(), files.end());
+    if (collect_subfolders) {
+        std::vector<std::string> next;
+        for (const NetEntry &d : dirs)
+            next.push_back(d.url);
+        collect_queue.insert(collect_queue.begin(), next.begin(), next.end());
+    }
+    collect_next();
+}
 
 } // namespace
 
@@ -624,6 +712,7 @@ void net_shutdown()
         upnp_starter.join();
     net_list_stop();
     clear_entries();
+    net_collect_stop();
     if (tv_thread.joinable())
         tv_thread.join();
     tv_list.clear();
@@ -653,6 +742,8 @@ void net_update()
         libvlc_dialog_dismiss(id);
     if (list_state == NET_LOADING && libvlc_media_get_parsed_status(listing) != 0)
         finish_listing();
+    if (collect_state == NET_LOADING && collecting && libvlc_media_get_parsed_status(collecting) != 0)
+        collect_folder_done();
     search_update();
 }
 
@@ -837,6 +928,37 @@ const std::vector<NetEntry> &net_list_entries()
 std::string net_list_error()
 {
     return list_error;
+}
+
+void net_collect(const std::string &url, bool subfolders)
+{
+    net_collect_stop();
+    collect_subfolders = subfolders;
+    collect_state = collect_open(url) ? NET_LOADING : NET_FAILED;
+    fprintf(stderr, "net: reading %s%s\n", url.c_str(), subfolders ? " and its subfolders" : "");
+}
+
+void net_collect_stop()
+{
+    if (collecting) {
+        libvlc_media_parse_stop(collecting);
+        libvlc_media_release(collecting);
+        collecting = nullptr;
+    }
+    collect_state = NET_IDLE;
+    collect_listed = 0;
+    collect_queue.clear();
+    collect_found.clear();
+}
+
+NetListState net_collect_state()
+{
+    return collect_state;
+}
+
+const std::vector<NetEntry> &net_collect_files()
+{
+    return collect_found;
 }
 
 NetAsk net_ask()
