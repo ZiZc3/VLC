@@ -32,7 +32,7 @@
 - **Network**: SMB shares, DLNA servers, network links (HTTP, HLS, DASH…), free TV channels and internet radio.
 - **Phone & PC page**: open `http://<ps5-ip>:8080` in any browser to send files to the PS5, download them back to your phone or PC, play a link on the TV, save a network share, or add your OpenSubtitles key.
 - Music mode with covers and a visualizer, a photo viewer, DVD / Blu-ray folders, and ZIP / RAR / 7z archives.
-- Two looks (**Classic** and **Modern**) and **16 languages**.
+- 3 looks (**Classic**, Redesign by Juxtopposed and **Modern**) and **16 languages**.
 
 ## Install
 
@@ -231,6 +231,7 @@ The libraries are downloaded by `build-deps.sh`; the changes to VLC and FFmpeg a
 - **[ryancallstrom](https://github.com/ryancallstrom)**: SMB files and folders in playlists, and build fixes (pull requests #17 and #18).
 - [iptv-org](https://github.com/iptv-org/iptv), [radio-browser.info](https://www.radio-browser.info/) and [OpenSubtitles](https://www.opensubtitles.com/).
 - **The "Redesign by Juxtopposed"** look is based on **VLC Redesign** by **[Juxtopposed](https://github.com/juxtopposed)**, used under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) and adapted for the PS5. Thanks to [StickyGonzales](https://github.com/StickyGonzales/vlc-redesign-juxtopposed) for showing the design working on real VLC.
+- **[ryancallstrom](https://github.com/ryancallstrom)**: SMB files and folders in playlists, and build fixes (pull requests #17 and #18).
 
 ## License
 
