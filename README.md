@@ -44,7 +44,7 @@ Download the [latest release](../../releases/latest), then:
 2. Start **VLC** from the home screen.
 3. Add your media: a USB drive, `/data/vlc/`, or send files from your pc/phone (Options › Send files from a phone).
 
-Optional full access. With etaHEN, OnionHEN or the Helper, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
+Optional full access. With Helper.elf, VLC can lift its sandbox. This gives it all of /data and USB drives plugged in while it runs. download [helper.elf](https://github.com/ZiZc3/VLC-PS5/raw/refs/heads/main/patches/Helper.elf)
 
 ## All VLC Features
 
