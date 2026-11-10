@@ -73,14 +73,32 @@ std::vector<int> library_playlist_items(const std::string &path);
 int library_playlist_count(const std::string &path);
 /* It names links (http://, rtp://...): a channel list, opened in Browse. */
 bool library_playlist_has_links(const std::string &path);
-/* Playlists made in VLC: <media>/Playlists/<name>.m3u8, one absolute path a
- * line (with #EXTINF names), so VLC on a computer reads them too. Only these
+/* Playlists made in VLC: <media>/Playlists/<name>.m3u8, one absolute path or
+ * smb:// address a line (with #EXTINF names and lengths, and #EXTIMG for a
+ * share's file's thumbnail), so VLC on a computer reads them too. Only these
  * are changed; ones found elsewhere just play. */
 bool library_playlist_ours(const std::string &path);
+/* An entry of one of ours: a library file (item, its index) or a file on a
+ * share (an smb:// address, item -1), with the name, length and thumbnail
+ * file the playlist keeps for it (#EXTINF, #EXTIMG). Library files whose
+ * drive is out are left out. */
+struct PlaylistEntry {
+    std::string path, name, thumb;
+    int64_t length_ms;
+    int item;
+};
+std::vector<PlaylistEntry> library_playlist_entries(const std::string &path);
+/* A file on a share put in a playlist: its length and picture are read in the
+ * background (with the share's login options) and kept in the playlists. */
+void library_playlist_look_at(const std::string &url, const std::vector<std::string> &options);
+/* A playlist entry's thumbnail file as a texture (main thread); 0 if none. */
+ImTextureID library_thumb(const std::string &thumb_file, float *aspect);
 /* A new empty one; its path, or "" (the name is taken, or no disk). */
 std::string library_playlist_create(const std::string &name);
 /* Adds a file at the end; false when it was already in or can't be written. */
 bool library_playlist_add(const std::string &playlist, const std::string &file);
+/* The same for several (a folder's files): how many went in. */
+int library_playlist_add_files(const std::string &playlist, const std::vector<std::string> &files);
 bool library_playlist_remove(const std::string &playlist, const std::string &file);
 /* Moves a file one place up (-1) or down (+1). */
 bool library_playlist_move(const std::string &playlist, const std::string &file, int step);

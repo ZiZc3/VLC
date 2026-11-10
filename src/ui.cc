@@ -30,6 +30,7 @@
 
 #include <fribidi/fribidi.h>
 #include <unordered_map>
+#include <deque>
 
 #include "gfx.h"
 #include "imgui.h"
@@ -1005,6 +1006,14 @@ void toast(const std::string &s, double secs = 2.5)
 std::string playing_path, playing_name;
 std::vector<int> playlist; /* the list it was started from */
 int playlist_pos;
+/* Files on shares in our playlists, as items of their own: -2 is the first,
+ * -3 the next... (-1 stays "none"), so a list holds them with library files. */
+std::deque<MediaItem> net_items;
+/* The open stream's options, name and whether it's a recent link (Watch again). */
+std::vector<std::string> stream_options;
+bool stream_remember;
+std::string stream_name;
+MediaItem &list_item(int i);
 float osd_anim;
 double osd_until;
 int osd_row = 1, osd_col = 2; /* row 0: seek bar; row 1: buttons */
@@ -1076,6 +1085,11 @@ bool was_active;
 std::vector<MediaItem> &L()
 {
     return library_items();
+}
+
+MediaItem &list_item(int i)
+{
+    return i >= 0 ? L()[i] : net_items[-2 - i];
 }
 
 /* ---- data for the tabs ----------------------------------------------------------- */
@@ -1290,7 +1304,7 @@ void start_playback(int item, int64_t from_ms, const std::vector<int> &list, boo
         buzz(0.35f, 45);
     music_bg = background;
     music_started_at = now;
-    MediaItem &m = L()[item];
+    MediaItem &m = list_item(item);
     bool same_file = playing_path == m.path; /* Watch again, Loop: what was set stays */
     playing_path = m.path;
     playing_name = m.name;
@@ -1302,7 +1316,13 @@ void start_playback(int item, int64_t from_ms, const std::vector<int> &list, boo
     /* a disc folder: dvd:// or bluray:// (an .iso is found out by VLC itself) */
     std::string target = m.disc && m.ext == "DVD" ? "dvd://" + m.path
                        : m.disc && m.ext == "BLU-RAY" ? "bluray://" + m.path : m.path;
-    if (!player_open(target, from_ms)) {
+    /* a file on a share: with its saved login */
+    std::vector<std::string> opts = item < 0 ? net_login_options(m.path) : std::vector<std::string>();
+    if (item < 0) {
+        stream_options = opts;
+        stream_name = m.name;
+    }
+    if (!player_open(target, from_ms, opts)) {
         toast(trf("Couldn't open %s", m.name.c_str()));
         library_set_busy(false);
         return;
@@ -1334,6 +1354,10 @@ void open_archive(const MediaItem &m);
 void open_item(int item, const std::vector<int> &list)
 {
     from_playlist = false;
+    if (item < 0) { /* a file on a share, from a playlist */
+        start_playback(item, 0, list);
+        return;
+    }
     MediaItem &m = L()[item];
     if (m.image) {
         open_viewer(item, list);
@@ -1425,7 +1449,7 @@ void play_neighbour(int step)
     }
     save_position(false);
     player_stop();
-    start_playback(playlist[pos], L()[playlist[pos]].resume_ms, playlist);
+    start_playback(playlist[pos], list_item(playlist[pos]).resume_ms, playlist);
 }
 
 /* The playing file's library index. */
@@ -1450,6 +1474,63 @@ void open_channel_list(const std::string &path)
     net_enter(file_uri(path), name);
 }
 
+/* "%20" and the like in an address, as text. */
+std::string url_text(const std::string &u)
+{
+    std::string out;
+    for (size_t i = 0; i < u.size(); i++) {
+        if (u[i] == '%' && i + 2 < u.size() && isxdigit((unsigned char)u[i + 1]) && isxdigit((unsigned char)u[i + 2])) {
+            out += (char)strtol(u.substr(i + 1, 2).c_str(), nullptr, 16);
+            i += 2;
+        } else {
+            out += u[i];
+        }
+    }
+    return out;
+}
+
+/* A file on a share in a playlist: its item (made, or brought up to date
+ * with what the playlist keeps: name, length, thumbnail). */
+int net_item(const PlaylistEntry &e)
+{
+    int k = 0;
+    while (k < (int)net_items.size() && net_items[k].path != e.path)
+        k++;
+    if (k == (int)net_items.size()) {
+        MediaItem m{};
+        m.path = e.path;
+        std::string file = url_text(e.path.substr(0, e.path.find('?')));
+        m.folder = file.substr(0, file.rfind('/'));
+        file = file.substr(file.rfind('/') + 1);
+        if (file.rfind('.') != std::string::npos) {
+            m.ext = file.substr(file.rfind('.') + 1);
+            for (char &c : m.ext)
+                c = (char)toupper((unsigned char)c);
+        }
+        m.audio = name_kind(file) == 1;
+        net_items.push_back(m);
+        /* nothing known yet: look at it (again, after a failed try last time) */
+        if (e.length_ms <= 0 && e.thumb.empty())
+            library_playlist_look_at(e.path, net_login_options(e.path));
+    }
+    MediaItem &m = net_items[k];
+    m.name = e.name;
+    m.length_ms = e.length_ms;
+    m.thumb = e.thumb.empty() ? 0 : library_thumb(e.thumb, &m.thumb_aspect);
+    return -2 - k;
+}
+
+/* What a playlist plays, in order: library files, and for ours files on shares too. */
+std::vector<int> playlist_queue(const std::string &path)
+{
+    if (!library_playlist_ours(path))
+        return library_playlist_items(path);
+    std::vector<int> out;
+    for (const PlaylistEntry &e : library_playlist_entries(path))
+        out.push_back(e.item >= 0 ? e.item : net_item(e));
+    return out;
+}
+
 /* A playlist file: its files, from the first (or a random one with shuffle). */
 void play_playlist(const std::string &path)
 {
@@ -1457,7 +1538,7 @@ void play_playlist(const std::string &path)
         open_channel_list(path);
         return;
     }
-    std::vector<int> list = library_playlist_items(path);
+    std::vector<int> list = playlist_queue(path);
     if (list.empty()) {
         toast("No files of this playlist are in the library", 3);
         return;
@@ -2216,6 +2297,10 @@ std::string pl_open;          /* the playlist being looked at, "" for the list *
 std::vector<int> pl_items;    /* its files that are in the library */
 double pl_items_at = -100;    /* read again now and then (drives come and go) */
 std::string pl_add_file;      /* PL_PICK / PL_NAME: the file to put in */
+std::string pl_add_folder;    /* PL_PICK / PL_NAME: or a folder, its files all go in */
+bool pl_add_subfolders;       /* a folder: its subfolders' files too */
+std::string pl_reading_into;  /* the playlist a share's folder goes in once it's read, or "" */
+std::string pl_reading_name;  /* that folder's name */
 std::string pl_rename;        /* PL_NAME: the playlist renamed, "" for a new one */
 void icon_plus_circle(float cx, float cy, float s, ImU32 col);
 void open_playlist_name(const std::string &rename);
@@ -2230,7 +2315,7 @@ const PlaylistFile *playlist_by_path(const std::string &path)
 
 void pl_reload()
 {
-    pl_items = library_playlist_items(pl_open);
+    pl_items = playlist_queue(pl_open);
     pl_items_at = now;
     if (pl_item_focus >= (int)pl_items.size())
         pl_item_focus = std::max(0, (int)pl_items.size() - 1);
@@ -2241,7 +2326,7 @@ std::string pl_summary(const std::vector<int> &list)
 {
     int64_t total = 0;
     for (int i : list)
-        total += std::max<int64_t>(0, L()[i].length_ms);
+        total += std::max<int64_t>(0, list_item(i).length_ms);
     std::string out = list.size() == 1 ? std::string(tr("1 item")) : trf("%d items", (int)list.size());
     if (total > 0)
         out += "  \xC2\xB7  " + format_time(total);
@@ -2260,7 +2345,7 @@ const std::vector<int> &playlist_items_cached(const std::string &path)
     static std::unordered_map<std::string, Cached> cache;
     Cached &c = cache[path];
     if (c.at == 0 || now - c.at > 3) {
-        c.items = library_playlist_items(path);
+        c.items = playlist_queue(path);
         c.at = now;
     }
     return c.items;
@@ -2305,7 +2390,7 @@ void playlist_cover(const std::string &path, float x, float y, float w, float h,
 {
     std::vector<int> pics;
     for (int i : playlist_items_cached(path))
-        if (i < (int)L().size() && L()[i].thumb && pics.size() < 4)
+        if (i < (int)L().size() && list_item(i).thumb && pics.size() < 4)
             pics.push_back(i);
     if (pics.empty()) {
         dl->AddRectFilledMultiColor(P(x, y), P(x + w, y + h), tint_for(path, 0.30f), tint_for(path + "#", 0.22f),
@@ -2316,7 +2401,7 @@ void playlist_cover(const std::string &path, float x, float y, float w, float h,
         return;
     }
     if (pics.size() < 4) {
-        thumb_cover(L()[pics[0]], x, y, w, h, round, ImDrawFlags_RoundCornersAll);
+        thumb_cover(list_item(pics[0]), x, y, w, h, round, ImDrawFlags_RoundCornersAll);
         return;
     }
     const float gap = 3;
@@ -2325,7 +2410,7 @@ void playlist_cover(const std::string &path, float x, float y, float w, float h,
                                            ImDrawFlags_RoundCornersBottomLeft, ImDrawFlags_RoundCornersBottomRight };
     rect(x, y, w, h, IM_COL32(0, 0, 0, 255), round);
     for (int k = 0; k < 4; k++)
-        thumb_cover(L()[pics[k]], x + (k % 2) * (cw + gap), y + (k / 2) * (ch + gap), cw, ch, round, corner[k]);
+        thumb_cover(list_item(pics[k]), x + (k % 2) * (cw + gap), y + (k / 2) * (ch + gap), cw, ch, round, corner[k]);
 }
 
 /* A playlist card, the size of a video card: the cover, the name, what's in
@@ -2448,6 +2533,7 @@ void tab_playlists()
         if (hit(PAD_CROSS)) {
             if (pl_focus == 0) {
                 pl_add_file.clear();
+                pl_add_folder.clear();
                 open_playlist_name("");
             } else if (library_playlist_has_links(pls[pl_focus - 1].path)) {
                 open_channel_list(pls[pl_focus - 1].path);
@@ -2502,7 +2588,7 @@ void tab_playlists()
             pl_item_focus--;
         if (hit(PAD_DOWN) && pl_item_focus + 1 < n)
             pl_item_focus++;
-        std::string cur = L()[pl_items[pl_item_focus]].path;
+        std::string cur = list_item(pl_items[pl_item_focus]).path;
         if (hit(PAD_CROSS)) {
             std::vector<int> list = pl_items;
             open_item(list[pl_item_focus], list);
@@ -2520,7 +2606,7 @@ void tab_playlists()
             if (library_playlist_move(pl_open, cur, step)) {
                 pl_reload();
                 for (int i = 0; i < (int)pl_items.size(); i++)
-                    if (L()[pl_items[i]].path == cur)
+                    if (list_item(pl_items[i]).path == cur)
                         pl_item_focus = i; /* the selection goes with it */
             }
         }
@@ -2541,7 +2627,7 @@ void tab_playlists()
             float y = top + head_h + i * rh - pl_item_scroll;
             if (y > bottom || y + rh < top - 60)
                 continue;
-            MediaItem &m = L()[pl_items[i]];
+            MediaItem &m = list_item(pl_items[i]);
             float f = focus_anim(hash_id(m.path, 240), i == pl_item_focus && modal == NONE, 16);
             sel_box(100, y + 2, 1720, rh - 4, f);
             text(f_reg, 21, 128, y + 13, C_FAINT, std::to_string(i + 1).c_str(), 0.5f);
@@ -2570,7 +2656,7 @@ void tab_playlists()
         float y = 216 + i * row_h - pl_item_scroll;
         if (y > 1080 || y + row_h < 150)
             continue;
-        MediaItem &m = L()[pl_items[i]];
+        MediaItem &m = list_item(pl_items[i]);
         float f = focus_anim(hash_id(m.path, 240), i == pl_item_focus && modal == NONE);
         list_row(96, y, 1728, row_h - 12, f, i % 2 == 0);
         float cy = y + (row_h - 12) / 2;
@@ -2596,7 +2682,9 @@ void tab_playlists()
             stroke(px - 2, py - 2, pic_w + 4, pic_h + 4, alpha(IM_COL32(255, 255, 255, 255), f), 12, 2);
         float tx = px + pic_w + 28;
         text(f_semi, 26, tx, cy - 32, mix(C_DIM, C_TEXT, 0.7f + 0.3f * f), m.name.c_str(), 0, 1300 - tx);
-        std::string sub = !m.artist.empty() ? m.artist : m.ext + "  \xC2\xB7  " + m.folder.substr(m.folder.rfind('/') + 1);
+        std::string sub = !m.artist.empty() ? m.artist
+                        : is_link(m.path) ? m.ext + "  \xC2\xB7  " + m.folder /* a share's: smb://... in full */
+                                          : m.ext + "  \xC2\xB7  " + m.folder.substr(m.folder.rfind('/') + 1);
         text(f_reg, 19, tx, cy + 4, C_FAINT, sub.c_str(), 0, 1300 - tx);
         if (m.length_ms > 0)
             text(f_semi, 22, 1792, cy - 14, C_DIM, format_time(m.length_ms).c_str(), 1);
@@ -3078,7 +3166,7 @@ void music_tick()
     if (player_ended() || (!player_active() && !player_buffering())) {
         int cur = current_item();
         int next = neighbour_pos(1);
-        if (cur >= 0 && next >= 0 && L()[cur].audio) {
+        if (cur != -1 && next >= 0 && list_item(cur).audio) {
             start_playback(playlist[next], 0, playlist, false, true);
             return;
         }
@@ -3885,11 +3973,6 @@ std::string link_name(const std::string &url)
 
 void start_playback(int item, int64_t from_ms, const std::vector<int> &list, bool seamless, bool background);
 
-/* The open stream's options, name and whether it's a recent link (Watch again). */
-std::vector<std::string> stream_options;
-bool stream_remember;
-std::string stream_name;
-
 void start_stream(const std::string &url, const std::vector<std::string> &options, bool remember,
                   const std::string &name, libvlc_media_t *media)
 {
@@ -4015,9 +4098,11 @@ void modal_add_share()
 /* "Add to playlist": "New playlist" first, then the ones made in VLC. */
 std::string trimmed(std::string s);
 
-void open_playlist_pick(const std::string &file)
+void open_playlist_pick(const std::string &file, const std::string &folder = "", bool subfolders = false)
 {
     pl_add_file = file;
+    pl_add_folder = folder;
+    pl_add_subfolders = subfolders;
     modal = PL_PICK;
     modal_focus = 0;
     modal_anim = 0;
@@ -4033,16 +4118,109 @@ void open_playlist_name(const std::string &rename)
     modal_anim = 0;
 }
 
+/* A file on a share that can go in a playlist: a video or a song on SMB. */
+bool share_media(const std::string &url, const std::string &name)
+{
+    return url.compare(0, 6, "smb://") == 0 && name_kind(name) <= 1;
+}
+
+/* What "Add to playlist" takes from a folder on the console: its videos and
+ * songs (A-Z), then its subfolders' if asked (each A-Z, as a share's are read). */
+std::vector<std::string> playlist_folder_files(const std::string &dir, bool subfolders)
+{
+    std::vector<std::string> files;
+    std::string prefix = dir + "/";
+    for (const MediaItem &m : L())
+        if (m.path.compare(0, prefix.size(), prefix) == 0 && !m.other && !m.text && !m.archive && !m.image &&
+            !is_link(m.path) && (subfolders || m.path.find('/', prefix.size()) == std::string::npos))
+            files.push_back(m.path);
+    /* level by level: a folder's files before its subfolders, names A-Z */
+    std::sort(files.begin(), files.end(), [&](const std::string &a, const std::string &b) {
+        for (size_t i = prefix.size();;) {
+            size_t ea = a.find('/', i), eb = b.find('/', i);
+            if ((ea == std::string::npos) != (eb == std::string::npos))
+                return ea == std::string::npos;
+            std::string na = a.substr(i, ea == std::string::npos ? ea : ea - i);
+            std::string nb = b.substr(i, eb == std::string::npos ? eb : eb - i);
+            if (na != nb) {
+                int c = strcasecmp(na.c_str(), nb.c_str());
+                return c ? c < 0 : na < nb;
+            }
+            if (ea == std::string::npos)
+                return false;
+            i = ea + 1;
+        }
+    });
+    return files;
+}
+
+void add_files_to_playlist(const std::string &playlist, const std::vector<std::string> &files)
+{
+    const PlaylistFile *pl = playlist_by_path(playlist);
+    std::string name = pl ? pl->name : "";
+    int added = library_playlist_add_files(playlist, files);
+    for (const std::string &f : files)
+        if (is_link(f))
+            library_playlist_look_at(f, net_login_options(f)); /* its length and picture */
+    if (added > 0)
+        toast(trf("Added %d files to %s", added, name.c_str()), 2);
+    else
+        toast(trf("Already in %s", name.c_str()), 2);
+}
+
 void add_to_playlist(const std::string &playlist)
 {
     const PlaylistFile *pl = playlist_by_path(playlist);
     std::string name = pl ? pl->name : "";
-    if (library_playlist_add(playlist, pl_add_file))
+    if (!pl_add_folder.empty()) {
+        /* A share's folder: read in the background, its files go in after. */
+        if (is_link(pl_add_folder)) {
+            pl_reading_into = playlist;
+            pl_reading_name = url_text(pl_add_folder.substr(pl_add_folder.rfind('/') + 1));
+            net_collect(pl_add_folder, pl_add_subfolders);
+            toast(trf("Reading %s...", pl_reading_name.c_str()), 3);
+            return;
+        }
+        std::vector<std::string> files = playlist_folder_files(pl_add_folder, pl_add_subfolders);
+        if (files.empty()) {
+            std::string folder = pl_add_folder.substr(pl_add_folder.rfind('/') + 1);
+            toast(trf("No videos or songs in %s", folder.c_str()), 3);
+            return;
+        }
+        add_files_to_playlist(playlist, files);
+    } else if (library_playlist_add(playlist, pl_add_file)) {
         toast(trf("Added to %s", name.c_str()), 2);
-    else
+        if (is_link(pl_add_file))
+            library_playlist_look_at(pl_add_file, net_login_options(pl_add_file));
+    } else
         toast(trf("Already in %s", name.c_str()), 2);
     if (playlist == pl_open)
         pl_reload();
+}
+
+/* Every frame: a share's folder being read for a playlist goes in once it's read. */
+void pl_reading_update()
+{
+    if (pl_reading_into.empty() || net_collect_state() == NET_LOADING)
+        return;
+    std::string playlist = pl_reading_into;
+    pl_reading_into.clear();
+    std::vector<std::string> files;
+    if (net_collect_state() == NET_READY)
+        for (const NetEntry &e : net_collect_files())
+            if (share_media(e.url, e.name))
+                files.push_back(e.url);
+    bool read = net_collect_state() == NET_READY;
+    net_collect_stop();
+    if (!read)
+        toast(trf("Couldn't read %s", pl_reading_name.c_str()), 3);
+    else if (files.empty())
+        toast(trf("No videos or songs in %s", pl_reading_name.c_str()), 3);
+    else {
+        add_files_to_playlist(playlist, files);
+        if (playlist == pl_open)
+            pl_reload();
+    }
 }
 
 void modal_pl_pick()
@@ -4063,6 +4241,8 @@ void modal_pl_pick()
         return;
     }
     MediaItem *m = library_find(pl_add_file);
+    std::string folder_name = url_text(pl_add_folder.substr(pl_add_folder.rfind('/') + 1));
+    std::string link_name = url_text(pl_add_file.substr(pl_add_file.rfind('/') + 1));
     float a = ease(modal_anim);
     dim_screen(a);
     const float w = 640, row = 76;
@@ -4071,8 +4251,12 @@ void modal_pl_pick()
     float x = 960 - w / 2, y = 540 - h / 2 + (1 - a) * 40;
     panel(x, y, w, h, a);
     text(f_bold, 30, x + 40, y + 30, alpha(C_TEXT, a), "Add to playlist");
-    if (m)
+    if (!pl_add_folder.empty())
+        text(f_reg, 21, x + 40, y + 74, alpha(C_DIM, a), folder_name.c_str(), 0, w - 80);
+    else if (m)
         text(f_reg, 21, x + 40, y + 74, alpha(C_DIM, a), m->name.c_str(), 0, w - 80);
+    else if (is_link(pl_add_file))
+        text(f_reg, 21, x + 40, y + 74, alpha(C_DIM, a), link_name.c_str(), 0, w - 80);
     int first = std::max(0, std::min(modal_focus - shown / 2, n - shown));
     for (int k = 0; k < shown; k++) {
         int i = first + k;
@@ -4115,8 +4299,14 @@ void modal_pl_name()
     text(f_bold, 36, x, classic_look ? 32 : 64, alpha(C_TEXT, a), pl_rename.empty() ? "New playlist" : "Rename playlist");
     text_box(x, 128, w, "Name the playlist", a, true);
     MediaItem *m = pl_add_file.empty() ? nullptr : library_find(pl_add_file);
-    if (m)
+    if (!pl_add_folder.empty())
+        text(f_reg, 22, x, 248, alpha(C_DIM, a),
+             trf("The files of %s go in", url_text(pl_add_folder.substr(pl_add_folder.rfind('/') + 1)).c_str()).c_str(), 0, w);
+    else if (m)
         text(f_reg, 22, x, 248, alpha(C_DIM, a), trf("%s goes in first", m->name.c_str()).c_str(), 0, w);
+    else if (is_link(pl_add_file))
+        text(f_reg, 22, x, 248, alpha(C_DIM, a),
+             trf("%s goes in first", url_text(pl_add_file.substr(pl_add_file.rfind('/') + 1)).c_str()).c_str(), 0, w);
     else
         text(f_reg, 22, x, 248, alpha(C_DIM, a), "Saved in the media folder's Playlists, as a file VLC on a computer opens too", 0, w);
     bool done = kb_frame(x, 640, w, true, a, nullptr);
@@ -4130,7 +4320,7 @@ void modal_pl_name()
                 toast("A playlist with this name is already there, or the disk can't be written", 3);
             } else {
                 modal = NONE;
-                if (!pl_add_file.empty()) {
+                if (!pl_add_file.empty() || !pl_add_folder.empty()) {
                     add_to_playlist(path);
                 } else {
                     toast(trf("Made %s", t.c_str()), 2);
@@ -4997,7 +5187,7 @@ void modal_about()
 /* Options (the OPTIONS button): a few actions, each with its icon. The
  * choices live in Settings. */
 enum { OI_SETTINGS, OI_RESCAN, OI_RESUME, OI_TRACKS, OI_STOP, OI_PHONE, OI_SEARCH, OI_LINK, OI_ADD_PL, OI_RENAME_PL,
-       OI_DELETE_PL };
+       OI_DELETE_PL, OI_ADD_FOLDER_PL, OI_ADD_SUBFOLDERS_PL };
 
 void icon_search(float cx, float cy, float s, ImU32 col)
 {
@@ -5047,7 +5237,7 @@ void option_icon(int icon, float cx, float cy, float s, ImU32 col)
         case OI_PHONE: jux_icon(JI_PHONE, cx, cy, s, col); return;
         case OI_SEARCH: jux_icon(JI_SEARCH, cx, cy, s, col); return;
         case OI_LINK: jux_icon(JI_LINK, cx, cy, s, col); return;
-        case OI_ADD_PL: jux_icon(JI_PLAYLIST_ADD, cx, cy, s, col); return;
+        case OI_ADD_PL: case OI_ADD_FOLDER_PL: case OI_ADD_SUBFOLDERS_PL: jux_icon(JI_PLAYLIST_ADD, cx, cy, s, col); return;
         case OI_RENAME_PL: jux_icon(JI_PENCIL, cx, cy, s, col); return;
         default: jux_icon(JI_TRASH, cx, cy, s, col); return;
         }
@@ -5060,7 +5250,7 @@ void option_icon(int icon, float cx, float cy, float s, ImU32 col)
     case OI_PHONE: icon_phone(cx, cy, s, col); break;
     case OI_SEARCH: icon_search(cx, cy, s, col); break;
     case OI_LINK: icon_link(cx, cy, s, col); break;
-    case OI_ADD_PL: icon_plus_circle(cx, cy, s * 0.95f, col); break;
+    case OI_ADD_PL: case OI_ADD_FOLDER_PL: case OI_ADD_SUBFOLDERS_PL: icon_plus_circle(cx, cy, s * 0.95f, col); break;
     case OI_RENAME_PL: icon_list(cx, cy, s * 0.9f, col); break;
     default: rect(cx - s * 0.26f, cy - s * 0.26f, s * 0.52f, s * 0.52f, col, s * 0.08f); break;
     }
@@ -5092,9 +5282,26 @@ void modal_options()
         if (!library_playlist_ours(pl_target))
             pl_target.clear();
     }
+    /* Browse: a folder, on the console or a share, its files into a playlist
+     * (on their own or with its subfolders'); on a share, a video or song */
+    std::string folder_target, share_target;
+    if (!in_player && tab == BROWSE && browse_focus < (int)browse_entries.size()) {
+        const BrowseEntry &e = browse_entries[browse_focus];
+        if (e.net == NET_FILE && share_media(e.path, e.name))
+            share_target = e.path;
+        if (e.dir && !e.playlist && (e.net == NET_NONE || (e.net == NET_DIR && e.path.compare(0, 6, "smb://") == 0)))
+            folder_target = e.path;
+    }
     if (target >= 0 && !L()[target].other && !L()[target].text && !L()[target].archive && !L()[target].image &&
         !is_link(L()[target].path))
         items.insert(items.begin() + 1, { "Add to playlist", OI_ADD_PL });
+    else if (!share_target.empty())
+        items.insert(items.begin() + 1, { "Add to playlist", OI_ADD_PL });
+    if (!folder_target.empty()) {
+        int at = 1 + (items[1].icon == OI_ADD_PL);
+        items.insert(items.begin() + at, { "Add this folder to playlist", OI_ADD_FOLDER_PL });
+        items.insert(items.begin() + at + 1, { "Add this folder + subfolders to playlist", OI_ADD_SUBFOLDERS_PL });
+    }
     if (!pl_target.empty()) {
         items.insert(items.begin(), { "Delete playlist", OI_DELETE_PL });
         items.insert(items.begin(), { "Rename playlist", OI_RENAME_PL });
@@ -5213,10 +5420,17 @@ void modal_options()
         leave_player(false);
         break;
     case OI_ADD_PL:
-        open_playlist_pick(L()[target].path);
+        open_playlist_pick(!share_target.empty() ? share_target : L()[target].path);
+        break;
+    case OI_ADD_FOLDER_PL:
+        open_playlist_pick("", folder_target);
+        break;
+    case OI_ADD_SUBFOLDERS_PL:
+        open_playlist_pick("", folder_target, true);
         break;
     case OI_RENAME_PL:
         pl_add_file.clear();
+        pl_add_folder.clear();
         open_playlist_name(pl_target);
         break;
     case OI_DELETE_PL:
@@ -6783,7 +6997,7 @@ void end_screen()
     if (modal == NONE) {
         if (hit(PAD_CROSS)) {
             int item = current_item();
-            if (item >= 0) {
+            if (item != -1) { /* (a share's file from a playlist: its list stays) */
                 restart_playing(item);
                 return;
             }
@@ -7375,7 +7589,7 @@ void player_screen()
         if (!ended) {
             library_set_resume(playing_path, 0, player_length());
             int cur = current_item();
-            if (loop_on() && cur >= 0) {
+            if (loop_on() && cur != -1) {
                 /* Loop this video. */
                 restart_playing(cur);
                 return;
@@ -8523,6 +8737,7 @@ void ui_frame(const PadState &pad, float frame_dt)
     /* VLC asks something (a login, a certificate): its window comes up over
      * whatever is open, which comes back after. Its errors become toasts. */
     net_update();
+    pl_reading_update();
     {
         NetAsk ask = net_ask();
         if (ask.serial && modal != LOGIN && modal != QUESTION) {
