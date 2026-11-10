@@ -43,3 +43,17 @@ bool web_take_finished();
 
 /* An OpenSubtitles key and account sent from the page, once. */
 bool web_take_opensubtitles(std::string *key, std::string *user, std::string *pass);
+
+/* A link another app or device asked us to play, once:
+ *   GET /api/play?url=<link>[&title=<name>][&sub=<subtitle link>]  (or /play)
+ * from: the asker's address, for the toast. The newest wins. */
+struct WebPlay {
+    std::string url, title, sub, from;
+};
+bool web_take_play(WebPlay *out);
+/* A network share typed on the page (POST /api/share: address, user, pass),
+ * once: saved on the console with its login. */
+bool web_take_share(std::string *address, std::string *user, std::string *pass);
+/* Whether a link is one we play when asked from outside: network links only
+ * (http, https, smb, ftp, udp, rtp, mms). */
+bool web_play_link_ok(const std::string &url);

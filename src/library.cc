@@ -1750,6 +1750,16 @@ std::vector<PlaylistEntry> library_playlist_entries(const std::string &path)
             if (!m)
                 continue; /* not in the library (its drive is out) */
             e.item = (int)(m - &items[0]);
+        } else {
+            /* a share's file: its thumbnail where this start keeps the cache.
+             * #EXTIMG has the full path from when it was made, and our folder
+             * moves (sandboxed it's /app0, with full access /mnt/sandbox/...),
+             * so that path can be gone while the file is still there. */
+            std::string mine = net_thumb_file(e.path);
+            if (has_file(mine))
+                e.thumb = mine;
+            else if (!e.thumb.empty() && !has_file(e.thumb))
+                e.thumb.clear();
         }
         out.push_back(e);
     }

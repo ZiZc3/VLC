@@ -925,7 +925,8 @@ float screen_fade = 1;
 /* Home: rows of cards. */
 struct Row {
     const char *title;
-    std::vector<int> items; /* indices into library_items() */
+    std::vector<int> items; /* indices into library_items(), or into library_playlists() */
+    bool playlists = false; /* the Playlists row: its items are playlists */
 };
 std::vector<Row> home_rows;
 int home_row, home_col[8];
@@ -1129,7 +1130,11 @@ void rebuild_lists()
     /* "Recently added" only when it says something "Videos" doesn't. */
     if (recent.items.size() == videos_list.size() && videos_list.size() <= 12)
         recent.items.clear();
-    for (Row *r : { &cont, &fav, &recent, &all, &music, &pictures })
+    /* the playlists, as on their tab (a shortcut: ✕ opens one there) */
+    Row lists = { "Playlists", {}, true };
+    for (int i = 0; i < (int)library_playlists().size(); i++)
+        lists.items.push_back(i);
+    for (Row *r : { &cont, &fav, &recent, &all, &lists, &music, &pictures })
         if (!r->items.empty())
             home_rows.push_back(*r);
     if (home_row >= (int)home_rows.size())
@@ -1509,8 +1514,9 @@ int net_item(const PlaylistEntry &e)
         }
         m.audio = name_kind(file) == 1;
         net_items.push_back(m);
-        /* nothing known yet: look at it (again, after a failed try last time) */
-        if (e.length_ms <= 0 && e.thumb.empty())
+        /* no picture kept for it (never looked at, a failed try, or the
+         * cache emptied): look at it, once a start */
+        if (e.thumb.empty())
             library_playlist_look_at(e.path, net_login_options(e.path));
     }
     MediaItem &m = net_items[k];
@@ -1955,6 +1961,8 @@ int focused_item()
             return -1;
         Row &r = home_rows[home_row];
         int c = home_col[home_row % 8];
+        if (r.playlists)
+            return -1; /* a playlist, not a file */
         return c >= 0 && c < (int)r.items.size() ? r.items[c] : -1;
     }
     case VIDEOS:
@@ -2032,8 +2040,22 @@ void library_actions()
     }
 }
 
+void playlist_card(float x, float y, float w, const PlaylistFile *pl, float f);
+void home_open_playlist(const std::string &path);
+
 void tab_home()
 {
+    /* a playlist made or deleted since the rows were built: build them again */
+    for (const Row &r : home_rows)
+        if (r.playlists && r.items.size() != library_playlists().size()) {
+            rebuild_lists();
+            break;
+        }
+    bool lists_row = false;
+    for (const Row &r : home_rows)
+        lists_row = lists_row || r.playlists;
+    if (!lists_row && !library_playlists().empty())
+        rebuild_lists(); /* the first one made */
     if (home_rows.empty()) {
         empty_state();
         return;
@@ -2055,8 +2077,21 @@ void tab_home()
             col--;
         if (hit(PAD_RIGHT) && col + 1 < (int)cur.items.size())
             col++;
-        if (hit(PAD_CROSS))
+        if (cur.playlists) {
+            const std::vector<PlaylistFile> &pls = library_playlists();
+            if (col >= 0 && col < (int)pls.size()) {
+                if (hit(PAD_CROSS)) {
+                    home_open_playlist(pls[col].path);
+                    return;
+                }
+                if (hit(PAD_TRIANGLE)) {
+                    play_playlist(pls[col].path);
+                    return;
+                }
+            }
+        } else if (hit(PAD_CROSS)) {
             open_item(cur.items[col], cur.items);
+        }
     }
 
     const float card_w = 352, gap = 34, row_h = 372, top = 150;
@@ -2083,9 +2118,9 @@ void tab_home()
         }
         int c = home_col[r % 8];
         /* Redesign: music is square covers, so its row packs closer */
-        bool covers = jux_look && !row.items.empty();
+        bool covers = jux_look && !row.items.empty() && !row.playlists;
         for (int it : row.items)
-            covers = covers && L()[it].audio;
+            covers = covers && !row.playlists && L()[it].audio;
         float step = covers ? card_w * 9 / 16 + gap : card_w + gap;
         float want = c * step;
         float visible = 1920 - 96 * 2;
@@ -2096,6 +2131,14 @@ void tab_home()
             if (x > 1920 || x + card_w < -100)
                 continue;
             bool focused = row_on && i == c && modal == NONE;
+            if (row.playlists) {
+                const std::vector<PlaylistFile> &pls = library_playlists();
+                if (row.items[i] >= (int)pls.size())
+                    continue;
+                const PlaylistFile &pl = pls[row.items[i]];
+                playlist_card(x, y + 54, card_w, &pl, focus_anim(hash_id(pl.path, 1 + r), focused));
+                continue;
+            }
             float f = focus_anim(hash_id(L()[row.items[i]].path, 1 + r), focused);
             video_card(x, y + 54, card_w, row.items[i], f);
         }
@@ -2319,6 +2362,24 @@ void pl_reload()
     pl_items_at = now;
     if (pl_item_focus >= (int)pl_items.size())
         pl_item_focus = std::max(0, (int)pl_items.size() - 1);
+}
+
+/* Home's Playlists row: ✕ opens the playlist on its tab, as if picked there
+ * (○ then goes back to that tab's list); a channel list opens in Browse. */
+void home_open_playlist(const std::string &path)
+{
+    if (library_playlist_has_links(path)) {
+        open_channel_list(path);
+        return;
+    }
+    tab = PLAYLISTS;
+    for (int i = 0; i < (int)library_playlists().size(); i++)
+        if (library_playlists()[i].path == path)
+            pl_focus = i + 1;
+    pl_open = path;
+    pl_item_focus = 0;
+    pl_item_scroll = 0;
+    pl_reload();
 }
 
 /* "3 videos · 1:24:10", for a list of library files. */
@@ -3338,6 +3399,9 @@ void tab_browse()
             if (b.item >= 0 && (!L()[b.item].other || b.item == e.item)) /* "next" skips other files */
                 list.push_back(b.item);
         open_item(e.item, list);
+        /* an archive opens as a folder: browse_entries was rebuilt (n and e
+         * are stale now), so draw it next frame (stress v0.6.1 run 7) */
+        return;
     }
     if (hit(PAD_CIRCLE) && !browse_dir.empty()) {
         bool is_root = false;
@@ -4027,6 +4091,38 @@ void start_stream(const std::string &url, const std::vector<std::string> &option
     ended = false;
     last_save_time = now;
     was_active = false;
+}
+
+/* A link another app asked for (autoplay.txt at start, or GET /api/play on
+ * the phone page's server): played as if typed in "Network link", with its
+ * subtitle link attached, and kept in Watch again. from: who asked ("" for
+ * the file), shown so a video never starts by surprise. */
+void play_outside_link(const std::string &url, const std::string &title, const std::string &sub,
+                       const std::string &from)
+{
+    fprintf(stderr, "outside link%s%s: %s%s\n", from.empty() ? "" : " from ", from.c_str(), url.c_str(),
+            sub.empty() ? "" : " (with subtitles)");
+    modal = NONE;
+    if (screen == VIEWER)
+        screen = LIBRARY;
+    if (!url.empty() && url[0] == '/') {
+        /* a file on the console (autoplay.txt): the library's, as if picked there */
+        if (MediaItem *m = library_find(url)) {
+            int i = (int)(m - &L()[0]);
+            open_item(i, { i });
+            return;
+        }
+    }
+    bool link = url.find("://") != std::string::npos;
+    libvlc_media_t *media = nullptr;
+    if (!sub.empty() && !is_playlist_url(url) && player_vlc()) {
+        media = libvlc_media_new_location(player_vlc(), (link ? url : file_uri(url)).c_str());
+        if (media)
+            libvlc_media_slaves_add(media, libvlc_media_slave_type_subtitle, 4, sub.c_str());
+    }
+    start_stream(url, link ? net_login_options(url) : std::vector<std::string>(), link, title, media);
+    if (!from.empty())
+        toast(trf("Playing a link from %s", from.c_str()), 3);
 }
 
 void open_search(const std::string &text)
@@ -5187,7 +5283,7 @@ void modal_about()
 /* Options (the OPTIONS button): a few actions, each with its icon. The
  * choices live in Settings. */
 enum { OI_SETTINGS, OI_RESCAN, OI_RESUME, OI_TRACKS, OI_STOP, OI_PHONE, OI_SEARCH, OI_LINK, OI_ADD_PL, OI_RENAME_PL,
-       OI_DELETE_PL, OI_ADD_FOLDER_PL, OI_ADD_SUBFOLDERS_PL };
+       OI_DELETE_PL, OI_ADD_FOLDER_PL, OI_ADD_SUBFOLDERS_PL, OI_REMOVE_PL };
 
 void icon_search(float cx, float cy, float s, ImU32 col)
 {
@@ -5238,6 +5334,7 @@ void option_icon(int icon, float cx, float cy, float s, ImU32 col)
         case OI_SEARCH: jux_icon(JI_SEARCH, cx, cy, s, col); return;
         case OI_LINK: jux_icon(JI_LINK, cx, cy, s, col); return;
         case OI_ADD_PL: case OI_ADD_FOLDER_PL: case OI_ADD_SUBFOLDERS_PL: jux_icon(JI_PLAYLIST_ADD, cx, cy, s, col); return;
+        case OI_REMOVE_PL: jux_icon(JI_TRASH, cx, cy, s, col); return;
         case OI_RENAME_PL: jux_icon(JI_PENCIL, cx, cy, s, col); return;
         default: jux_icon(JI_TRASH, cx, cy, s, col); return;
         }
@@ -5274,6 +5371,7 @@ void modal_options()
     /* the file in front of you: into a playlist */
     int target = in_player ? current_item() : focused_item();
     std::string pl_target; /* Playlists tab: the one opened or selected */
+    std::string pl_remove; /* inside an open one: the focused file, to take out of it (the file itself stays) */
     if (!in_player && tab == PLAYLISTS) {
         if (!pl_open.empty())
             pl_target = pl_open;
@@ -5281,6 +5379,8 @@ void modal_options()
             pl_target = library_playlists()[pl_focus - 1].path;
         if (!library_playlist_ours(pl_target))
             pl_target.clear();
+        if (!pl_open.empty() && !pl_target.empty() && pl_item_focus < (int)pl_items.size())
+            pl_remove = list_item(pl_items[pl_item_focus]).path;
     }
     /* Browse: a folder, on the console or a share, its files into a playlist
      * (on their own or with its subfolders'); on a share, a video or song */
@@ -5302,6 +5402,8 @@ void modal_options()
         items.insert(items.begin() + at, { "Add this folder to playlist", OI_ADD_FOLDER_PL });
         items.insert(items.begin() + at + 1, { "Add this folder + subfolders to playlist", OI_ADD_SUBFOLDERS_PL });
     }
+    if (!pl_remove.empty())
+        items.insert(items.begin() + 1, { "Remove from playlist", OI_REMOVE_PL });
     if (!pl_target.empty()) {
         items.insert(items.begin(), { "Delete playlist", OI_DELETE_PL });
         items.insert(items.begin(), { "Rename playlist", OI_RENAME_PL });
@@ -5435,6 +5537,13 @@ void modal_options()
         break;
     case OI_DELETE_PL:
         ask_delete(pl_target, NONE);
+        break;
+    case OI_REMOVE_PL:
+        if (library_playlist_remove(pl_open, pl_remove)) {
+            const PlaylistFile *pl = playlist_by_path(pl_open);
+            toast(trf("Removed from %s", pl ? pl->name.c_str() : ""), 1.8);
+            pl_reload();
+        }
         break;
     default: /* Resume */
         break;
@@ -6122,8 +6231,53 @@ void modal_phone()
 }
 
 /* The page's subtitle-download card, and what arrived from it. */
+/* autoplay.txt in our folder (/data/homebrew/PPSA85300): a launcher writes a
+ * link in it and starts VLC, or writes it while VLC runs. Line 1: the link
+ * (or a file on the console, from /), line 2: a title, line 3: a subtitle
+ * link or file; all but the first may be left out. Read at start and every
+ * 2 s, played once, the file deleted. Needs no full access (our own folder),
+ * unlike GET /api/play. */
+void autoplay_check()
+{
+    static double last = -100;
+    if (now - last < 2)
+        return;
+    last = now;
+    std::string path = std::string(plat_data_dir()) + "/autoplay.txt";
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f)
+        return;
+    std::string l[3];
+    char line[4096];
+    for (int i = 0; i < 3 && fgets(line, sizeof(line), f); i++) {
+        l[i] = line;
+        while (!l[i].empty() && (l[i].back() == '\n' || l[i].back() == '\r' || l[i].back() == ' '))
+            l[i].pop_back();
+        if (i == 0 && l[0].size() >= 3 && (unsigned char)l[0][0] == 0xEF)
+            l[0] = l[0].substr(3); /* a UTF-8 mark at the start */
+    }
+    fclose(f);
+    unlink(path.c_str());
+    struct stat st;
+    auto local = [&](const std::string &p) { return !p.empty() && p[0] == '/' && stat(p.c_str(), &st) == 0; };
+    std::string sub = l[2];
+    if (local(sub))
+        sub = file_uri(sub);
+    else if (!sub.empty() && !web_play_link_ok(sub))
+        sub.clear();
+    if (local(l[0])) {
+        play_outside_link(l[0], l[1], sub, "");
+    } else if (web_play_link_ok(l[0])) {
+        play_outside_link(l[0], l[1], sub, "");
+    } else {
+        fprintf(stderr, "autoplay.txt: not a link or a file: \"%s\"\n", l[0].substr(0, 200).c_str());
+        toast("autoplay.txt: not a link VLC can play", 3);
+    }
+}
+
 void web_frame()
 {
+    autoplay_check();
     static double next_status;
     if (now >= next_status) {
         next_status = now + 0.5;
@@ -6149,6 +6303,15 @@ void web_frame()
     }
     if (modal != OSUB_SETUP && modal != OSUB_RESULTS)
         osub_check_tick();
+    WebPlay asked;
+    if (web_take_play(&asked))
+        play_outside_link(asked.url, asked.title, asked.sub, asked.from);
+    std::string sh_addr, sh_user, sh_pass;
+    if (web_take_share(&sh_addr, &sh_user, &sh_pass)) {
+        std::string url = net_add_server(trimmed(sh_addr), trimmed(sh_user), sh_pass);
+        rebuild_browse();
+        toast(trf("Network share saved: %s", url.substr(url.find("://") + 3).c_str()), 3);
+    }
     if (web_take_finished()) {
         toast("A file arrived from your phone or PC", 2.5);
         if (screen != PLAYER) {
@@ -8827,7 +8990,9 @@ void ui_frame(const PadState &pad, float frame_dt)
                               browse_entries[browse_focus].net == NET_LINK);
             std::vector<std::pair<uint32_t, const char *>> h = { { PAD_CROSS, open_kind ? "Open" : "Play" } };
             int fi = focused_item();
-            if (fi >= 0 && L()[fi].other) {
+            if (tab == HOME && home_row < (int)home_rows.size() && home_rows[home_row].playlists) {
+                h = { { PAD_CROSS, "Open" }, { PAD_TRIANGLE, "Play" } }; /* a playlist, as on its tab */
+            } else if (fi >= 0 && L()[fi].other) {
                 h = { { PAD_SQUARE, "Details" } };
             } else if (fi >= 0) {
                 h.push_back({ PAD_TRIANGLE, L()[fi].favourite ? "Unfavourite" : "Favourite" });

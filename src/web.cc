@@ -47,6 +47,12 @@ bool finished;
 /* an OpenSubtitles key and account sent from the page */
 bool osub_sent;
 std::string osub_key, osub_user, osub_pass;
+/* a link to play, asked from outside (GET /api/play) */
+bool play_sent;
+/* a network share to save, with its login (POST /api/share) */
+bool share_sent;
+std::string share_addr, share_user, share_pass;
+WebPlay play_req;
 std::string address;
 double address_at = -100;
 
@@ -411,6 +417,46 @@ void handle(int fd)
             osub_sent = true;
         }
         respond(fd, ok ? 200 : 400, "text/plain", ok ? "ok" : "no key");
+    } else if (method == "POST" && path == "/api/share") {
+        /* a network share typed on the phone, saved on the console with its login */
+        while ((int64_t)body.size() < length && length < 4096) {
+            ssize_t r = read(fd, buf, sizeof(buf));
+            if (r <= 0)
+                break;
+            body.append(buf, (size_t)r);
+        }
+        std::string addr = query_value(body, "address");
+        bool ok = !addr.empty() && addr.size() < 500;
+        for (char c : addr)
+            ok = ok && (unsigned char)c >= 0x20;
+        if (ok) {
+            std::lock_guard<std::mutex> g(lock);
+            share_addr = addr;
+            share_user = query_value(body, "user");
+            share_pass = query_value(body, "pass");
+            share_sent = true;
+        }
+        respond(fd, ok ? 200 : 400, "text/plain", ok ? "ok" : "no address");
+    } else if (method == "GET" && (path == "/api/play" || path == "/play")) {
+        /* another app or device: play this link (TorrServer, Lampa, a launcher) */
+        WebPlay p;
+        p.url = query_value(query, "url");
+        p.title = query_value(query, "title");
+        p.sub = query_value(query, "sub");
+        sockaddr_in peer = {};
+        socklen_t plen = sizeof(peer);
+        char ip[INET_ADDRSTRLEN] = "";
+        if (getpeername(fd, (sockaddr *)&peer, &plen) == 0)
+            inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+        p.from = ip;
+        bool ok = web_play_link_ok(p.url) && p.title.size() < 300 && (p.sub.empty() || web_play_link_ok(p.sub));
+        if (ok) {
+            std::lock_guard<std::mutex> g(lock);
+            play_req = p;
+            play_sent = true;
+        }
+        fprintf(stderr, "web: play from %s: %s\n", ip, ok ? "taken" : "refused (not a network link)");
+        respond(fd, ok ? 200 : 400, "text/plain", ok ? "ok" : "url: a network link (http, https, smb...)");
     } else if (method == "GET" && path == "/favicon.ico") {
         respond(fd, 404, "text/plain", "");
     } else {
@@ -545,6 +591,45 @@ bool web_take_opensubtitles(std::string *key, std::string *user, std::string *pa
     *pass = osub_pass;
     osub_pass.clear();
     return true;
+}
+
+bool web_take_share(std::string *address, std::string *user, std::string *pass)
+{
+    std::lock_guard<std::mutex> g(lock);
+    if (!share_sent)
+        return false;
+    share_sent = false;
+    *address = share_addr;
+    *user = share_user;
+    *pass = share_pass;
+    share_pass.clear();
+    return true;
+}
+
+bool web_take_play(WebPlay *out)
+{
+    std::lock_guard<std::mutex> g(lock);
+    if (!play_sent)
+        return false;
+    play_sent = false;
+    *out = play_req;
+    return true;
+}
+
+bool web_play_link_ok(const std::string &url)
+{
+    /* what this build opens (no live555, sftp or nfs: no rtsp, sftp, nfs) */
+    static const char *const schemes[] = { "http://", "https://", "smb://", "ftp://", "udp://", "rtp://",
+                                           "mms://", "mmsh://" };
+    if (url.size() > 4000)
+        return false;
+    for (char c : url)
+        if ((unsigned char)c < 0x20)
+            return false; /* no line breaks or control characters */
+    for (const char *s : schemes)
+        if (!strncasecmp(url.c_str(), s, strlen(s)) && url.size() > strlen(s))
+            return true;
+    return false;
 }
 
 bool web_take_finished()

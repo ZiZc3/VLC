@@ -757,7 +757,7 @@ std::vector<NetServer> net_servers()
     return out;
 }
 
-std::string net_add_server(const std::string &address)
+std::string net_add_server(const std::string &address, const std::string &user, const std::string &password)
 {
     std::string a = address;
     while (!a.empty() && (a.back() == ' ' || a.back() == '/' || a.back() == '\\'))
@@ -770,12 +770,18 @@ std::string net_add_server(const std::string &address)
     if (a.find("://") == std::string::npos)
         a = "smb://" + a;
     a = without_login(a);
-    for (const Saved &s : saved)
-        if (s.url == a)
+    for (Saved &s : saved)
+        if (s.url == a) {
+            if (!user.empty()) { /* a login sent with it (the phone page): kept */
+                s.user = user;
+                s.password = password;
+                store_saved();
+            }
             return a;
+        }
     std::string name = a.substr(a.find("://") + 3);
     std::replace(name.begin(), name.end(), '/', ' ');
-    saved.push_back({ name, a, "", "" });
+    saved.push_back({ name, a, user, password });
     store_saved();
     return a;
 }

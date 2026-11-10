@@ -43,7 +43,9 @@ void net_update();    /* main thread, every frame */
 
 std::vector<NetServer> net_servers();
 /* "192.168.1.20", "\\NAS\Movies", "smb://nas/Movies" -> smb://...; saved. */
-std::string net_add_server(const std::string &address);
+std::string net_add_server(const std::string &address, const std::string &user = "",
+                           const std::string &password = "");
+/* (with a login: kept with it, as the phone page sends one along) */
 void net_forget_server(const std::string &url);
 bool net_is_saved_server(const std::string &url);
 

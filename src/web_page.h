@@ -57,8 +57,8 @@ header h1 small { display: block; font-size: 12.5px; font-weight: 500; color: va
 /* the tab bar: a dark box, the highlight glides under the chosen tab */
 nav { position: sticky; top: 0; z-index: 3; padding: 14px 16px 12px; max-width: 980px; margin: 0 auto;
   backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
-.tabs { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); background: var(--bar);
-  border: 1px solid var(--line); border-radius: 18px; padding: 6px; max-width: 620px; margin: 0 auto;
+.tabs { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--bar);
+  border: 1px solid var(--line); border-radius: 18px; padding: 6px; max-width: 720px; margin: 0 auto;
   box-shadow: 0 10px 40px rgba(0, 0, 0, .6); }
 .tabs .hl { position: absolute; top: 6px; bottom: 6px; left: 6px; width: 0; border-radius: 13px;
   background: linear-gradient(180deg, #ff9a1f, var(--or)); box-shadow: 0 0 14px var(--glow), 0 0 0 1px rgba(255, 170, 60, .3) inset;
@@ -237,6 +237,7 @@ footer { position: relative; z-index: 1; text-align: center; color: var(--faint)
   <div class="hl" id="hl"></div>
   <button role="tab" data-tab="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M7 9l5-5 5 5M5 20h14"/></svg><span class="t">Send</span><span class="n" id="n-send"></span></button>
   <button role="tab" data-tab="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="t">On the PS5</span><span class="n" id="n-files"></span></button>
+  <button role="tab" data-tab="net"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg><span class="t">Network</span></button>
   <button role="tab" data-tab="subs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 13h4M13 13h4M7 16h7"/></svg><span class="t">Subtitles</span></button>
 </div></nav>
 
@@ -263,6 +264,34 @@ footer { position: relative; z-index: 1; text-align: center; color: var(--faint)
       <div class="headrow"><div class="places" data-places></div>
         <button class="act round" id="refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button></div>
       <div class="rows" id="files"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-net">
+    <h2>Play on the TV</h2>
+    <p class="lead">Paste a video link (TorrServer, a stream, a file on a server) and VLC plays it on the PS5 right away.</p>
+    <div class="card">
+      <form class="form" id="play-form" autocomplete="off">
+        <div class="field"><input id="play-url" placeholder=" " inputmode="url" autocapitalize="off" spellcheck="false"><label for="play-url">Link (http, https, smb…)</label></div>
+        <div class="two">
+          <div class="field"><input id="play-title" placeholder=" " spellcheck="false"><label for="play-title">Title<em>optional</em></label></div>
+          <div class="field"><input id="play-sub" placeholder=" " inputmode="url" autocapitalize="off" spellcheck="false"><label for="play-sub">Subtitle link<em>optional</em></label></div>
+        </div>
+        <button class="go" id="play-go" type="submit">Play on the PS5</button>
+      </form>
+    </div>
+    <h2 style="margin-top:34px">Add a network share</h2>
+    <p class="lead">A Windows PC, a Mac or a NAS on this network. It's saved in VLC with its login and shows up in Browse.</p>
+    <div class="card">
+      <form class="form" id="share-form" autocomplete="off">
+        <div class="field"><input id="share-addr" placeholder=" " autocapitalize="off" spellcheck="false"><label for="share-addr">Address (192.168.1.20, \\NAS\Movies, smb://nas/Movies)</label></div>
+        <div class="two">
+          <div class="field"><input id="share-user" placeholder=" " autocomplete="off" autocapitalize="off" spellcheck="false"><label for="share-user">User name<em>optional</em></label></div>
+          <div class="field"><input id="share-pass" type="password" placeholder=" " autocomplete="new-password"><label for="share-pass">Password<em>optional</em></label></div>
+        </div>
+        <button class="go" id="share-save" type="submit">Save in VLC</button>
+      </form>
+      <p class="help">The login stays on your PS5. This page never shows it again.</p>
     </div>
   </section>
 
@@ -344,7 +373,7 @@ async function api(url, opts) {
 }
 
 /* Tabs: the highlight glides to the tab, the panel slides in from that side. */
-const TABS = ["send", "files", "subs"];
+const TABS = ["send", "files", "net", "subs"];
 let tab = null;
 function moveHl() {
   const b = $(`.tabs [data-tab="${tab}"]`), hl = $("#hl");
@@ -568,7 +597,40 @@ $("#os-form").onsubmit = async e => {
   }
 };
 
-/* first tab: the address's #send / #files / #subs, else the last one used */
+/* Network: a link played on the PS5 now, and a share saved in VLC. */
+$("#play-form").onsubmit = async e => {
+  e.preventDefault();
+  const url = $("#play-url").value.trim();
+  if (!url) { toast("Paste a link first", "bad"); $("#play-url").focus(); return; }
+  let q = "/api/play?url=" + encodeURIComponent(url);
+  const title = $("#play-title").value.trim(), sub = $("#play-sub").value.trim();
+  if (title) q += "&title=" + encodeURIComponent(title);
+  if (sub) q += "&sub=" + encodeURIComponent(sub);
+  const btn = $("#play-go");
+  btn.disabled = true;
+  const r = await api(q);
+  btn.disabled = false;
+  if (r && r.ok) toast("Playing on the PS5", "ok");
+  else if (r) toast("That isn't a link VLC can play (http, https, smb…)", "bad");
+  else toast("Couldn't reach the PS5", "bad");
+};
+$("#share-form").onsubmit = async e => {
+  e.preventDefault();
+  const addr = $("#share-addr").value.trim();
+  if (!addr) { toast("Type the address of the computer or NAS", "bad"); $("#share-addr").focus(); return; }
+  const btn = $("#share-save");
+  btn.disabled = true;
+  const body = "address=" + encodeURIComponent(addr) + "&user=" + encodeURIComponent($("#share-user").value.trim()) +
+               "&pass=" + encodeURIComponent($("#share-pass").value);
+  const r = await api("/api/share", { method: "POST", body,
+    headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  btn.disabled = false;
+  $("#share-pass").value = "";
+  if (r && r.ok) { $("#share-addr").value = ""; $("#share-user").value = ""; toast("Saved in VLC: it's in Browse", "ok"); }
+  else toast("Couldn't reach the PS5", "bad");
+};
+
+/* first tab: the address's #send / #files / #net / #subs, else the last one used */
 const want = location.hash.slice(1) || load("vlcps5-tab");
 show(TABS.includes(want) ? want : "send", true);
 addEventListener("load", moveHl);
