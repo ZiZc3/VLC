@@ -11,6 +11,10 @@
 # and platform layer, RADV, then ps5-native-tool converts and signs.
 set -euo pipefail
 
+# llvm-readelf is named llvm-readelf-18 on Debian/Ubuntu and llvm-readelf on
+# Arch, Fedora, Homebrew... Use whichever exists; LLVM_READELF overrides.
+LLVM_READELF=${LLVM_READELF:-$(command -v llvm-readelf-18 || command -v llvm-readelf || echo llvm-readelf-18)}
+
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=$(dirname "$here")
 work_root=${VLC_PS5_WORK:-$HOME/ps5/vlc-ps5}
@@ -176,7 +180,7 @@ done
 (cd "$vk/runtime" && sha256sum --check --strict --quiet libc.prx.sha256)
 cp "$vk/runtime/libc.prx" "$app/sce_module/libc.prx"
 # Every GOT slot and its symbol, for the startup import report.
-llvm-readelf-18 -r --wide "$work/llvm-pie.elf" |
+"$LLVM_READELF" -r --wide "$work/llvm-pie.elf" |
     awk '$3 == "R_X86_64_GLOB_DAT" || $3 == "R_X86_64_JUMP_SLOT" { print $1, $5 }' \
     > "$app/imports.txt"
 # Fonts: the interface's, and VLC's subtitle fonts (patches/0001's paths).
