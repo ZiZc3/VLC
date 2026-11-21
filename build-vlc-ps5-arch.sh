@@ -19,6 +19,15 @@
 
 set -Eeuo pipefail
 
+# Everything below is wrapped in { ...; exit; } so bash parses the whole script
+# before running any of it. Without this, editing or replacing this file while
+# a (long) build is running makes bash read from the wrong offset and die with
+# bogus "syntax error" messages.
+{
+
+SCRIPT_VERSION="9 (native-tool built directly, libvlc stamp, brace-wrapped)"
+printf '\033[1;34m==> build-vlc-ps5-arch.sh version %s\033[0m\n' "$SCRIPT_VERSION"
+
 # ----------------------------------------------------------------- config ---
 REPO_DIR="$PWD"
 VLC_VERSION="${VLC_VERSION:-3.0.24}"
@@ -82,6 +91,21 @@ fi
 mkdir -p "$PS5_DIR" "$VLC_SRC_DIR"
 export HOME="$FAKE_HOME"          # from here on, ~/ps5/... lives in the repo
 
+# Arch ships unversioned LLVM tools (llvm-objcopy, clang, ...) but the repo's
+# scripts call the Debian/Ubuntu names (llvm-objcopy-18, clang-18, ...).
+# Provide version-suffixed symlinks in ./.build/bin (no system changes).
+LLVM_SUFFIX="${LLVM_SUFFIX:-18}"
+mkdir -p "$BUILD_ROOT/bin"
+for tool in /usr/bin/llvm-* /usr/bin/clang /usr/bin/clang++ /usr/bin/clang-cpp \
+            /usr/bin/ld.lld /usr/bin/lld /usr/bin/lld-link /usr/bin/wasm-ld; do
+  [[ -x "$tool" ]] || continue
+  name="$(basename "$tool")"
+  [[ "$name" =~ -[0-9]+$ ]] && continue            # already versioned
+  [[ -e "/usr/bin/${name}-${LLVM_SUFFIX}" ]] && continue
+  ln -sf "$tool" "$BUILD_ROOT/bin/${name}-${LLVM_SUFFIX}"
+done
+export PATH="$BUILD_ROOT/bin:$PATH"
+
 # ------------------------------------------------- PS5_Vulkan (RADV) ---------
 # Plain `make` in PS5_Vulkan builds probe titles and is NOT what VLC needs.
 # The README's RADV recipe is: make deps; setup-native-dependencies; build-radv.
@@ -117,6 +141,37 @@ else
   build_vulkan
 fi
 
+# ------------------------------------------- PS5_Vulkan host packaging tool ---
+# ps5/build-title.sh needs PS5_Vulkan/build/host/ps5-native-tool (ELF converter
+# / FSELF writer). PS5_Vulkan builds it inside tools/build.sh with a C++ compile
+# using -Werror, which fails on Arch's newer clang, so build it here with the
+# same sources but without -Werror (warnings are fine).
+ensure_native_tool() {
+  local root="$VULKAN_DIR" native="$VULKAN_DIR/tooling/native"
+  local tool="$root/build/host/ps5-native-tool"
+  [[ -x "$tool" ]] && { log "ps5-native-tool already built"; return; }
+  log "Building PS5_Vulkan host tool: ps5-native-tool"
+
+  local cxx="${CXX:-$(command -v clang++ || command -v clang++-18 || true)}"
+  [[ -n "$cxx" ]] || die "clang++ not found"
+  [[ -f "$native/native_app_builder.cpp" ]] || die "$native/native_app_builder.cpp not found (PS5_Vulkan layout changed?)"
+
+  # zlib: PS5_Vulkan's pinned static copy if `make deps` fetched it, else system zlib
+  local zlib_root="$root/.deps/native/zlib/root" zlib_args zlib_inc=()
+  local zlib_a; zlib_a="$(find "$zlib_root" -type f -name libz.a -print -quit 2>/dev/null || true)"
+  if [[ -n "$zlib_a" ]]; then zlib_args=("$zlib_a"); zlib_inc=(-I "$zlib_root/usr/include")
+  else zlib_args=(-lz); warn "pinned zlib not found; using system zlib"; fi
+
+  mkdir -p "$root/build/host"
+  "$cxx" -std=c++20 -O2 -Wall -Wextra "${zlib_inc[@]}" \
+    "$native/native_app_builder.cpp" "$native/self_container.cpp" \
+    "$native/elf_object.cpp" "$native/sce_module_writer.cpp" \
+    "${zlib_args[@]}" -o "$tool" \
+    || die "Failed to compile ps5-native-tool (see compiler errors above)."
+  [[ -x "$tool" ]] || die "ps5-native-tool was not produced."
+}
+ensure_native_tool
+
 # ------------------------------------------------------------- PS5 SDK ------
 # Reuse the SDK that PS5_Vulkan fetched (kept inside the repo) if the caller
 # did not point us at one.
@@ -135,8 +190,34 @@ fi
 log "Fetching vlc-${VLC_VERSION} tarball"
 pushd "$VLC_SRC_DIR" >/dev/null
 [[ -f "vlc-${VLC_VERSION}.tar.xz" ]] || curl -fLO "https://download.videolan.org/pub/videolan/vlc/${VLC_VERSION}/vlc-${VLC_VERSION}.tar.xz"
-[[ -d "vlc-${VLC_VERSION}" ]] || tar xf "vlc-${VLC_VERSION}.tar.xz"
+# configure-vlc.sh patches the VLC tree in place and is NOT safe to run twice
+# (a second run re-applies the patches: "redefinition of 'colour'" in vmem.c).
+# So: no stamp = the tree may be half/double patched -> start from fresh source.
+CONF_STAMP="$BUILD_ROOT/.libvlc-${VLC_VERSION}-configured"
+[[ "${FORCE_CONFIGURE:-0}" == "1" ]] && rm -f "$CONF_STAMP"
+if [[ ! -f "$CONF_STAMP" ]]; then
+  rm -rf "vlc-${VLC_VERSION}" "$PS5_DIR/vlc-ps5/build-vlc-ps5"
+  tar xf "vlc-${VLC_VERSION}.tar.xz"
+fi
 popd >/dev/null
+
+# ------------------------------------------- tool names in the repo scripts ---
+# Rewrites Debian-style versioned tool names (llvm-objcopy-18, clang-18, ...)
+# to Arch's unversioned ones in the repo's own build scripts. Idempotent.
+# Undo with: git checkout -- ps5/        Disable with: PATCH_SCRIPTS=0
+if [[ "${PATCH_SCRIPTS:-1}" == "1" ]]; then
+  log "Patching versioned LLVM tool names in ps5/ scripts"
+  re='\b(llvm-[a-z0-9]+(-[a-z0-9]+)*|clang\+\+|clang|ld\.lld|lld)-'"${LLVM_SUFFIX}"'\b'
+  mapfile -t files < <(grep -rlE "$re" ps5 --include='*.sh' --include='Makefile*' \
+                         --include='*.mk' --include='*.cmake' --include='*.txt' 2>/dev/null || true)
+  for f in "${files[@]}"; do
+    sed -i -E "s/${re}/\\1/g" "$f"
+    echo "  patched $f"
+  done
+  [[ ${#files[@]} -gt 0 ]] || echo "  nothing to patch"
+  leftover="$(grep -rnE -- "-${LLVM_SUFFIX}\b" ps5 --include='*.sh' 2>/dev/null | grep -v 'prospero' || true)"
+  [[ -z "$leftover" ]] || { warn "remaining '-${LLVM_SUFFIX}' references (check these if the build fails):"; echo "$leftover" >&2; }
+fi
 
 # ------------------------------------------------------------------ build ---
 cd "$REPO_DIR"
@@ -146,7 +227,12 @@ log "Building dependencies (FFmpeg, GnuTLS, libass, ...)"
 bash ps5/deps/build-deps.sh
 
 log "Configuring and building libvlc ${VLC_VERSION}"
-bash ps5/configure-vlc.sh
+if [[ -f "$CONF_STAMP" ]]; then
+  log "libvlc already configured and built (FORCE_CONFIGURE=1 to redo); skipping"
+else
+  bash ps5/configure-vlc.sh
+  touch "$CONF_STAMP"
+fi
 
 log "Packaging title (eboot.bin)"
 bash ps5/build-title.sh
@@ -158,3 +244,6 @@ if [[ -d "$OUT" ]]; then
 else
   warn "Build finished but $OUT was not found; check the output above."
 fi
+
+exit 0
+}
