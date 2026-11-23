@@ -25,11 +25,12 @@ set -Eeuo pipefail
 # bogus "syntax error" messages.
 {
 
-SCRIPT_VERSION="9 (native-tool built directly, libvlc stamp, brace-wrapped)"
+SCRIPT_VERSION="11 (full isolation, env.sh, leak audit, libc.prx step)"
 printf '\033[1;34m==> build-vlc-ps5-arch.sh version %s\033[0m\n' "$SCRIPT_VERSION"
 
 # ----------------------------------------------------------------- config ---
 REPO_DIR="$PWD"
+REAL_HOME="$HOME"
 VLC_VERSION="${VLC_VERSION:-3.0.24}"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -90,6 +91,46 @@ fi
 
 mkdir -p "$PS5_DIR" "$VLC_SRC_DIR"
 export HOME="$FAKE_HOME"          # from here on, ~/ps5/... lives in the repo
+
+# Keep EVERYTHING inside the repo folder: not just HOME, but every place a tool
+# or one of the repo's scripts might look. The repo scripts honour these
+# variables (build-deps.sh / build-title.sh read them before falling back to
+# $HOME/ps5/...), so they no longer depend on HOME alone.
+export VLC_PS5_WORK="$PS5_DIR/vlc-ps5"
+export PS5_VULKAN="$VULKAN_DIR"
+export XDG_CACHE_HOME="$FAKE_HOME/.cache" XDG_CONFIG_HOME="$FAKE_HOME/.config" \
+       XDG_DATA_HOME="$FAKE_HOME/.local/share" XDG_STATE_HOME="$FAKE_HOME/.local/state"
+export TMPDIR="$BUILD_ROOT/tmp"
+export CCACHE_DIR="$FAKE_HOME/.ccache" PIP_CACHE_DIR="$FAKE_HOME/.cache/pip" \
+       CARGO_HOME="$FAKE_HOME/.cargo" GIT_CONFIG_GLOBAL="$FAKE_HOME/.gitconfig"
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+
+# Source this to run any repo script by hand with the same isolation:
+#   source .build/env.sh && TARGET=ps5 bash ps5/build-title.sh
+cat > "$BUILD_ROOT/env.sh" <<ENVEOF
+export HOME="$FAKE_HOME" VLC_PS5_WORK="$VLC_PS5_WORK" PS5_VULKAN="$PS5_VULKAN"
+export XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
+export XDG_DATA_HOME="$XDG_DATA_HOME" XDG_STATE_HOME="$XDG_STATE_HOME" TMPDIR="$TMPDIR"
+export CCACHE_DIR="$CCACHE_DIR" PIP_CACHE_DIR="$PIP_CACHE_DIR" CARGO_HOME="$CARGO_HOME"
+export GIT_CONFIG_GLOBAL="$GIT_CONFIG_GLOBAL" PATH="$BUILD_ROOT/bin:\$PATH"
+[ -n "\${PS5_PAYLOAD_SDK:-}" ] || export PS5_PAYLOAD_SDK="$VULKAN_DIR/.deps/native/ps5-payload-sdk"
+ENVEOF
+
+# Leak audit: list files created/changed under your REAL home (outside the
+# repo folder) during this run. Runs on exit, success or failure.
+touch "$BUILD_ROOT/.run-start"
+audit_leaks() {
+  local out
+  out="$(find "$REAL_HOME" -xdev \( -path "$REPO_DIR" -o -path "$REAL_HOME/.local/share/Trash" \) -prune \
+          -o -type f -newer "$BUILD_ROOT/.run-start" -print 2>/dev/null | head -n 40 || true)"
+  if [[ -n "$out" ]]; then
+    warn "files touched under $REAL_HOME OUTSIDE $REPO_DIR during this run:"
+    printf '  %s\n' $out >&2
+  else
+    printf '\033[1;34m==> audit: nothing written under %s outside the repo folder\033[0m\n' "$REAL_HOME"
+  fi
+}
+trap audit_leaks EXIT
 
 # Arch ships unversioned LLVM tools (llvm-objcopy, clang, ...) but the repo's
 # scripts call the Debian/Ubuntu names (llvm-objcopy-18, clang-18, ...).
@@ -171,6 +212,37 @@ ensure_native_tool() {
   [[ -x "$tool" ]] || die "ps5-native-tool was not produced."
 }
 ensure_native_tool
+
+# ------------------------------------------- PS5_Vulkan runtime/libc.prx ------
+# build-title.sh copies PS5_Vulkan/runtime/libc.prx into the title. PS5_Vulkan's
+# README calls it the "generated clean-room libc.prx"; only libc.prx.sha256 is
+# tracked, so it has to be generated. Try the Makefile rule for it; if there is
+# none, say where PS5_Vulkan mentions it instead of guessing further.
+ensure_libc_prx() {
+  local prx="$VULKAN_DIR/runtime/libc.prx"
+  if [[ -f "$prx" ]]; then
+    ( cd "$VULKAN_DIR/runtime" && sha256sum --check --strict --quiet libc.prx.sha256 ) \
+      && { log "runtime/libc.prx present and checksum OK"; return; }
+    warn "runtime/libc.prx exists but fails its checksum; regenerating"
+    rm -f "$prx"
+  fi
+  log "Generating PS5_Vulkan runtime/libc.prx"
+  ( cd "$VULKAN_DIR"
+    for t in runtime/libc.prx libc.prx runtime; do
+      if make -n "$t" >/dev/null 2>&1; then
+        log "make $t"; make "$t" && [[ -f runtime/libc.prx ]] && break
+      fi
+    done )
+  if [[ ! -f "$prx" ]]; then
+    warn "Could not generate $prx automatically. PS5_Vulkan mentions it here:"
+    ( cd "$VULKAN_DIR" && grep -rn "libc.prx" Makefile tools tooling 2>/dev/null \
+        | grep -v "sce_module/libc.prx" | head -n 20 ) >&2 || true
+    die "Create runtime/libc.prx (see lines above), or copy it from another PS5_Vulkan checkout, then re-run."
+  fi
+  ( cd "$VULKAN_DIR/runtime" && sha256sum --check --strict --quiet libc.prx.sha256 ) \
+    || die "Generated libc.prx fails its checksum (runtime/libc.prx.sha256)."
+}
+ensure_libc_prx
 
 # ------------------------------------------------------------- PS5 SDK ------
 # Reuse the SDK that PS5_Vulkan fetched (kept inside the repo) if the caller
