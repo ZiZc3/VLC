@@ -199,6 +199,7 @@ Optional full access. With Helper.elf, VLC can lift its sandbox. This gives it a
 | `/data/homebrew/PPSA85300/media/` | The app's own media folder |
 | `/data/vlc/` | Your media on the console (needs full access) |
 | `/mnt/usb0` … `/mnt/usb7`, `/mnt/ext0` | USB and extended storage |
+| `/mnt/disc` | The disc drive (a game, movie or data disc in it) |
 | `/data/homebrew/PPSA85300/vlc-ps5.log` | Log of the last session (attach it when reporting a problem) |
 
 ## Building

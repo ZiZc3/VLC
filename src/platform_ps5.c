@@ -555,7 +555,7 @@ const char *const *plat_media_roots(void)
     static const char *const roots[] = {
         "/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3",
         "/mnt/usb4", "/mnt/usb5", "/mnt/usb6", "/mnt/usb7",
-        "/mnt/ext0", "/mnt/ext1", "/data/vlc", "/data/media", NULL,
+        "/mnt/ext0", "/mnt/ext1", "/mnt/disc", "/data/vlc", "/data/media", NULL,
     };
     return roots;
 }

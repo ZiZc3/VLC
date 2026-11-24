@@ -9,6 +9,10 @@
 # No recipe lists the system's libraries: the PS5 has none of them either.
 set -euo pipefail
 
+# llvm-objcopy is named llvm-objcopy-18 on Debian/Ubuntu and llvm-objcopy on
+# Arch, Fedora, Homebrew... Use whichever exists; LLVM_OBJCOPY overrides.
+LLVM_OBJCOPY=${LLVM_OBJCOPY:-$(command -v llvm-objcopy-18 || command -v llvm-objcopy || echo llvm-objcopy-18)}
+
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 target=${TARGET:-host}
 work=${VLC_PS5_WORK:-$HOME/ps5/vlc-ps5}
@@ -360,7 +364,7 @@ build_bluray() {
         -Dbdj_jar=disabled -Denable_docs=false
     ninja -C "$src/build-bluray-$target" install
     # Its gc_free (graphics controller) clashes with Mesa's (RADV) in the title.
-    llvm-objcopy-18 --redefine-sym gc_free=bluray_gc_free "$prefix/lib/libbluray.a"
+    "$LLVM_OBJCOPY" --redefine-sym gc_free=bluray_gc_free "$prefix/lib/libbluray.a"
 }
 
 # ZIP / RAR / 7z (extras): libarchive for VLC's archive module, reading only.

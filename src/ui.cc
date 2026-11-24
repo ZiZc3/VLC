@@ -3001,6 +3001,9 @@ void classic_label(const BrowseEntry &e, std::string *name, std::string *type, i
         } else if (r.find("/usb") != std::string::npos) {
             *name = trf("USB drive (%s)", r.substr(r.rfind('/') + 1).c_str());
             *type = "Removable drive";
+        } else if (r == "/mnt/disc") {
+            *name = "Disc drive";
+            *type = "Disc";
         } else if (r.find("/ext") != std::string::npos) {
             *name = trf("Extended storage (%s)", r.substr(r.rfind('/') + 1).c_str());
             *type = "Drive";
@@ -6334,6 +6337,8 @@ void web_places_update()
             name = trf("USB drive %d", atoi(r.c_str() + 8) + 1);
         else if (!r.compare(0, 8, "/mnt/ext"))
             name = "Extended storage";
+        else if (r == "/mnt/disc")
+            name = "Disc drive";
         else if (r == "/data/vlc")
             name = "Console storage (/data/vlc)";
         places.push_back({ name, r });
