@@ -1,0 +1,179 @@
+diff -ru a/src/network.cc b/src/network.cc
+--- a/src/network.cc	2026-11-21 10:25:34.000000000 +0000
++++ b/src/network.cc	2026-11-23 21:08:54.980438345 +0000
+@@ -140,6 +140,9 @@
+     if (errors.size() < 8)
+         errors.push_back({ title ? title : "", t });
+     last_error = t;
++    /* libbluray: the disc's menus are Java, which doesn't run here */
++    if (t.compare(0, 31, "This Blu-ray disc requires Java") == 0)
++        player_bluray_needs_java();
+ }
+ 
+ void cb_login(void *, libvlc_dialog_id *id, const char *title, const char *text,
+diff -ru a/src/player.cc b/src/player.cc
+--- a/src/player.cc	2026-11-21 10:25:34.000000000 +0000
++++ b/src/player.cc	2026-11-23 21:08:54.979721344 +0000
+@@ -90,6 +90,11 @@
+ int64_t opened_from_ms;   /* where the open started */
+ bool first_picture_wait;
+ std::string software_path;
++/* VLC-PS5: a Blu-ray whose menus are Java (BD-J) has none we can run: libbluray
++ * says so (network.cc's error callback -> player_bluray_needs_java) and the
++ * disc is reopened without menus, playing its main title. */
++std::atomic<bool> bdj_seen{ false };
++std::string no_menu_path;
+ struct Health {
+     double next;           /* next check (plat_time) */
+     int bad_seconds;
+@@ -2351,6 +2356,9 @@
+     libvlc_media_add_option(m, ":input-fast-seek");
+     /* A Blu-ray checks the player's region (VLC's default is B, Europe): ours. */
+     libvlc_media_add_option(m, (":bluray-region=" + player_bluray_region()).c_str());
++    /* Menus off (Settings), or this disc's are Java: the main title straight away */
++    if (!player_bluray_menus() || path == no_menu_path)
++        libvlc_media_add_option(m, ":no-bluray-menu");
+     std::string alang = player_audio_language(), slang = player_sub_language();
+     if (!alang.empty())
+         libvlc_media_add_option(m, (":audio-language=" + alang).c_str());
+@@ -2522,6 +2530,22 @@
+         return PLAYER_EVENT_NONE;
+     }
+     if (stopping || queued_media)
++        bdj_seen = false;
++    else if (mp && bdj_seen.exchange(false) && !current_path.empty() && current_path != no_menu_path) {
++        /* a Java Blu-ray: its menus can't run here. Open it again without them. */
++        fprintf(stderr, "player: %s has Java menus: reopening without menus\n", current_path.c_str());
++        hold_picture = true;
++        no_menu_path = current_path;
++        std::string path = current_path;
++        stop_in_background();
++        {
++            std::lock_guard<std::mutex> g(audio_lock);
++            audio_clear_locked();
++        }
++        player_open(path, 0);
++        return PLAYER_EVENT_NONE;
++    }
++    if (stopping || queued_media)
+         vdec_failed = false; /* the video before's decoder, on its way out */
+     else if (mp && vdec_failed.exchange(false) && !current_path.empty()) {
+         /* the console's decoder gave up on this video: FFmpeg, same place.
+@@ -3944,6 +3968,25 @@
+     pref_set("bd_region", region);
+ }
+ 
++/* prefs bd_menus (Settings): Blu-ray menus on (the default) or off */
++bool player_bluray_menus()
++{
++    return pref_int("bd_menus", 1) != 0;
++}
++
++void player_set_bluray_menus(bool on)
++{
++    pref_set("bd_menus", on ? 1 : 0);
++    if (on)
++        no_menu_path.clear();
++}
++
++/* libbluray found Java menus (any thread) */
++void player_bluray_needs_java()
++{
++    bdj_seen = true;
++}
++
+ std::string player_audio_language()
+ {
+     return pref_str("lang_audio", "");
+diff -ru a/src/player.h b/src/player.h
+--- a/src/player.h	2026-11-21 10:25:34.000000000 +0000
++++ b/src/player.h	2026-11-23 21:08:54.980070436 +0000
+@@ -54,6 +54,11 @@
+ /* The Blu-ray region VLC plays as (A, B, C), from the next file. */
+ std::string player_bluray_region();
+ void player_set_bluray_region(const std::string &region);
++/* Blu-ray menus (HDMV) on or off, from the next disc; a Java (BD-J) disc is
++ * reopened without menus by itself once libbluray says it has them. */
++bool player_bluray_menus();
++void player_set_bluray_menus(bool on);
++void player_bluray_needs_java();
+ void player_disc_menu(bool popup);
+ bool player_disc_has_popup();
+ bool player_paused();
+diff -ru a/src/ui.cc b/src/ui.cc
+--- a/src/ui.cc	2026-11-21 10:25:34.000000000 +0000
++++ b/src/ui.cc	2026-11-23 21:09:09.635112423 +0000
+@@ -5582,14 +5582,14 @@
+ enum {
+     ST_DECODING, ST_ALANG, ST_SLANG, ST_SOUND, ST_NIGHT, ST_SPEAKERS, ST_THEME, ST_HAPTICS,
+     ST_SWIPES, ST_REPEAT, ST_SHUFFLE, ST_DEBUG, ST_STORAGE, ST_VERSION, ST_RELOAD, ST_ABOUT,
+-    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_UPSCALE, ST_JUXTHEME, ST_COUNT
++    ST_WEB, ST_LOOK, ST_OSUB, ST_UILANG, ST_SETUP, ST_BDREGION, ST_HWDEC, ST_MATCH, ST_UPSCALE, ST_JUXTHEME, ST_BDMENU, ST_COUNT
+ };
+ const char *const st_labels[ST_COUNT] = {
+     "Decoding", "Audio language", "Subtitle language", "Sound output", "Night mode",
+     "Speaker test", "Theme", "Controller vibration", "Touchpad swipes", "Repeat the list", "Shuffle",
+     "Detailed log", "Storage", "Version", "Reload drives", "About VLC", "Phone access", "Look",
+     "Subtitle downloads", "Language", "Run setup again", "Blu-ray region", "Hardware decoding",
+-    "Match frame rate", "Upscaling", "Theme",
++    "Match frame rate", "Upscaling", "Theme", "Blu-ray menus",
+ };
+ /* One line under the focused setting: what it does. */
+ const char *const st_help[ST_COUNT] = {
+@@ -5619,6 +5619,7 @@
+     "Films play at their own 24, 25 or 50 Hz: smoother pans. Some TVs go black a moment",
+     "Enlarges smaller videos. FSRCNNX: films. Anime4K: anime",
+     "Dark or light, as the design has both",
++    "Menus of Blu-ray discs. Java menus (BD-J) can't run here: those discs play their film without menus",
+ };
+ 
+ /* Categories: an icon, a name, and their settings. */
+@@ -5629,7 +5630,7 @@
+ };
+ enum { SI_PLAY, SI_SOUND, SI_THEME, SI_LIST, SI_GEAR, SI_VIDEO };
+ const SettingsCat settings_cats[] = {
+-    { "Playback", SI_PLAY, { ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION } },
++    { "Playback", SI_PLAY, { ST_ALANG, ST_SLANG, ST_OSUB, ST_BDREGION, ST_BDMENU } },
+     { "Video", SI_VIDEO, { ST_HWDEC, ST_UPSCALE, ST_MATCH, ST_DECODING } },
+     { "Sound", SI_SOUND, { ST_SOUND, ST_NIGHT, ST_SPEAKERS } },
+     { "Interface", SI_THEME, { ST_UILANG, ST_LOOK, ST_JUXTHEME, ST_THEME, ST_HAPTICS, ST_SWIPES } },
+@@ -5760,6 +5761,7 @@
+     case ST_ALANG: case ST_UILANG: si_globe(cx, cy, s, col); break;
+     case ST_SLANG: case ST_OSUB: icon_cc(cx, cy, s * 0.9f, col); break;
+     case ST_BDREGION: si_globe(cx, cy, s, col); break;
++    case ST_BDMENU: icon_play(cx + s * 0.06f, cy, s * 0.66f, col); break;
+     case ST_SOUND: icon_speaker(cx, cy, s * 0.85f, col); break;
+     case ST_NIGHT: si_moon(cx, cy, s, col); break;
+     case ST_SPEAKERS: si_surround(cx, cy, s, col); break;
+@@ -5838,6 +5840,7 @@
+     case ST_WEB: return web_running() ? "On" : "Off";
+     case ST_ABOUT: return "v" VLC_PS5_VERSION;
+     case ST_BDREGION: return trf("Region %s", player_bluray_region().c_str());
++    case ST_BDMENU: return player_bluray_menus() ? "On" : "Off";
+     default: return "";
+     }
+ }
+@@ -5867,6 +5870,11 @@
+         toast("Blu-ray region: from the next disc you open", 2.5);
+         break;
+     }
++    case ST_BDMENU:
++        player_set_bluray_menus(!player_bluray_menus());
++        toast(player_bluray_menus() ? "Blu-ray menus: from the next disc you open"
++                                    : "Blu-ray: the film plays without menus, from the next disc", 2.5);
++        break;
+     case ST_SOUND:
+         player_set_audio_output(!player_audio_output());
+         toast(player_audio_output() ? "Surround: 5.1 / 7.1 files from the next one you open" : "Stereo from the next file", 3);
+--- a/README.md	2026-11-21 10:25:34.000000000 +0000
++++ b/README.md	2026-11-23 21:09:19.513111072 +0000
+@@ -159,7 +159,8 @@
+ |---|---|
+ | DVD folders and ISOs with menus | ✅ |
+ | Blu-ray folders and ISOs (unprotected) | ✅ |
+-| Blu-ray Java (BD-J) menus | ❌ Java Blu-ray menus not supported |
++| Blu-ray menus (HDMV: top menu, pop-up menu, D-pad + ✕) | ✅ Settings › Playback › Blu-ray menus |
++| Blu-ray Java (BD-J) menus | ⚠️ Can't run (no Java on the console): the disc is reopened without menus and plays its main title |
+ | ZIP, RAR and 7z archives open like folders | ✅ |
+ 
+ ## Controls
